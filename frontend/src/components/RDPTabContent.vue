@@ -45,7 +45,7 @@ import { Loader } from '@lucide/vue'
 import { useI18n } from '../i18n'
 import type { ConnectionConfig } from '../types/session'
 import { RDPHide, RDPSetFullScreen } from '../../bindings/github.com/ys-ll/uniterm/app'
-import { usePanelLifecycle } from '../services/panelLifecycle'
+import { isPanelLifecycleCancelled, usePanelLifecycle } from '../services/panelLifecycle'
 import { backendErrorText, backendErrorTextOf } from '../utils/backendError'
 import { Events } from '@wailsio/runtime'
 
@@ -106,6 +106,7 @@ async function connect() {
     const info = await lifecycle.createSession(props.panelId, 'rdp', props.config)
     currentSessionId.value = info.id
   } catch (e) {
+    if (isPanelLifecycleCancelled(e)) return
     console.error('RDP connect error:', e)
     errorMessage.value = backendErrorText(e)
     status.value = 'error'

@@ -2,11 +2,13 @@ package session
 
 import (
 	"fmt"
+	"sync"
 )
 
 type SPICESession struct {
 	baseSession
-	wsURL string // direct WebSocket URL passed to frontend spice-client
+	proxyMu sync.RWMutex
+	wsURL   string // direct WebSocket URL passed to frontend spice-client
 }
 
 func NewSPICESession(id string) *SPICESession {
@@ -32,13 +34,18 @@ func (s *SPICESession) Connect(config ConnectionConfig) error {
 	}
 
 	s.title = fmt.Sprintf("%s (SPICE)", config.Host)
+	s.proxyMu.Lock()
 	s.wsURL = fmt.Sprintf("ws://%s:%d/", host, port)
+	s.proxyMu.Unlock()
 
 	s.setStatus(StatusConnected)
 	return nil
 }
 
 func (s *SPICESession) Disconnect() error {
+	s.proxyMu.Lock()
+	s.wsURL = ""
+	s.proxyMu.Unlock()
 	s.setStatus(StatusDisconnected)
 	return nil
 }
@@ -56,5 +63,7 @@ func (s *SPICESession) Write(data []byte) error {
 }
 
 func (s *SPICESession) ProxyAddr() string {
+	s.proxyMu.RLock()
+	defer s.proxyMu.RUnlock()
 	return s.wsURL
 }

@@ -70,8 +70,10 @@ import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { Loader } from '@lucide/vue'
 import { useI18n } from '../i18n'
 import { usePanelStore } from '../stores/panelStore'
+import type { ConnectionConfig } from '../types/session'
 import { Clipboard, Events } from '@wailsio/runtime'
-import { usePanelLifecycle } from '../services/panelLifecycle'
+import { usePanelLifecycle, isPanelLifecycleCancelled } from '../services/panelLifecycle'
+import { backendSessionApi, resolveDesktopSession } from '../services/backendSessionApi'
 const { t } = useI18n()
 const panelStore = usePanelStore()
 
@@ -116,8 +118,12 @@ function watchThemeBackground() {
 let rfb: any = null
 let unsubStatus: (() => void) | null = null
 let isIniting = false
+let initGeneration = 0
+let restoreGeneration = 0
+let clientTransferredToCache = false
 const lifecycle = usePanelLifecycle()
-lifecycle.registerResource(props.panelId, () => {
+const releaseClient = lifecycle.registerResource(props.panelId, () => {
+  if (clientTransferredToCache) return
   try { rfb?.disconnect() } catch (_) {}
   rfb = null
 })
@@ -134,27 +140,81 @@ async function connect() {
       panelStore.setProxyAddr(props.panelId, info.proxyAddr)
       savedPassword.value = props.config.password || ''
       initRFB(info.proxyAddr, savedPassword.value)
+    } else {
+      void restoreExistingSession()
     }
   } catch (e: any) {
+    if (isPanelLifecycleCancelled(e)) return
     console.error('VNC connect error:', e)
     lastError.value = e?.message || String(e)
     status.value = 'error'
   }
 }
 
+async function restoreExistingSession(): Promise<boolean> {
+  const sessionId = currentSessionId.value
+  if (!sessionId || !props.config) return false
+  const generation = ++restoreGeneration
+  const current = () => generation === restoreGeneration
+    && lifecycle.isOpen(props.panelId)
+    && currentSessionId.value === sessionId
+  try {
+    const resolution = resolveDesktopSession(
+      (await backendSessionApi.listSessions()).find(s => s.id === sessionId),
+      'vnc',
+      panelStore.getProxyAddr(props.panelId),
+    )
+    if (!current()) return true
+    switch (resolution.kind) {
+      case 'missing':
+        panelStore.removeProxyAddr(props.panelId)
+        currentSessionId.value = null
+        status.value = 'disconnected'
+        return true
+      case 'error':
+        lastError.value = t('vnc.errorClosed')
+        status.value = 'error'
+        return true
+      case 'disconnected':
+        panelStore.removeProxyAddr(props.panelId)
+        status.value = 'disconnected'
+        return true
+      case 'connect':
+        panelStore.setProxyAddr(props.panelId, resolution.proxyAddr)
+        savedPassword.value = props.config.password || ''
+        status.value = 'connecting'
+        initRFB(resolution.proxyAddr, savedPassword.value)
+        return true
+    }
+  } catch (e) {
+    if (isPanelLifecycleCancelled(e) || !current()) return true
+    console.warn('VNC session restore failed:', e)
+    lastError.value = t('vnc.errorClosed')
+    status.value = 'error'
+    return true
+  }
+}
+
 async function reconnect() {
+  restoreGeneration++
+  initGeneration++
+  isIniting = false
   await lifecycle.disposeSession(props.panelId)
+  panelStore.removeProxyAddr(props.panelId)
+  panelStore.removeVNCCache(props.panelId)
   currentSessionId.value = null
   if (rfb) {
     rfb.disconnect()
     rfb = null
   }
+  status.value = 'disconnected'
   await connect()
 }
 
 function initRFB(proxyAddr: string, password: string) {
   if (isIniting) return
   isIniting = true
+  const generation = ++initGeneration
 
   if (rfb) {
     try { rfb.disconnect() } catch (_) {}
@@ -173,8 +233,10 @@ function initRFB(proxyAddr: string, password: string) {
   import('@novnc/novnc').then((module: any) => {
     const LoadedRFB = module.default || module
     ;(window as any).__novnc_RFB = LoadedRFB
+    if (generation !== initGeneration) return
     createRFB(LoadedRFB, proxyAddr, password)
   }).catch((e: any) => {
+    if (generation !== initGeneration) return
     console.error('Failed to load noVNC module:', e)
     lastError.value = e?.message || String(e)
     status.value = 'error'
@@ -191,7 +253,7 @@ function applyRFBOptions() {
 }
 
 function createRFB(RFB: any, proxyAddr: string, password: string) {
-  if (!vncContainer.value || vncContainer.value.childElementCount > 0) {
+  if (!lifecycle.isOpen(props.panelId) || !vncContainer.value || vncContainer.value.childElementCount > 0) {
     isIniting = false
     return
   }
@@ -276,15 +338,21 @@ onMounted(() => {
   }
 
   const cached = panelStore.getVNCCache(props.panelId)
-  if (cached && vncContainer.value) {
+  const restoredCache = !!cached
+    && typeof cached.rfb?.disconnect === 'function'
+    && !!cached.container
+    && cached.container.childElementCount > 0
+  if (restoredCache && cached && vncContainer.value) {
     const children = Array.from(cached.container.children)
     children.forEach(child => vncContainer.value!.appendChild(child))
     rfb = cached.rfb
-    panelStore.removeVNCCache(props.panelId)
+    panelStore.takeVNCCache(props.panelId)
+    cached.container.remove()
     status.value = 'connected'
     applyRFBOptions()
     watchThemeBackground()
-    return
+  } else if (cached) {
+    panelStore.removeVNCCache(props.panelId)
   }
 
   // Register event listener BEFORE connect() — with synchronous VNC/SPICE
@@ -292,8 +360,10 @@ onMounted(() => {
   // would arrive before the listener if we registered it after.
   unsubStatus = Events.On('session:status', (ev) => { const data: any = ev.data; 
     if (data.id !== currentSessionId.value) return
+    restoreGeneration++
     switch (data.status) {
       case 'connected':
+        if (status.value === 'connected' && rfb) break
         if (data.proxyAddr) {
           panelStore.setProxyAddr(props.panelId, data.proxyAddr)
         }
@@ -310,6 +380,7 @@ onMounted(() => {
         }
         break
       case 'disconnected':
+        panelStore.removeProxyAddr(props.panelId)
         if (status.value !== 'error') status.value = 'disconnected'
         break
       case 'error':
@@ -320,11 +391,14 @@ onMounted(() => {
   })
 
   const storedProxy = panelStore.getProxyAddr(props.panelId)
-  if (storedProxy && props.config) {
+  if (restoredCache) {
+    // The live client was restored above; still install the view's listeners.
+  } else if (storedProxy && props.config) {
     savedPassword.value = props.config.password || ''
     initRFB(storedProxy, savedPassword.value)
   } else if (currentSessionId.value) {
     status.value = 'connecting'
+    void restoreExistingSession()
   } else {
     connect()
   }
@@ -336,27 +410,38 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  themeObserver?.disconnect()
-  themeObserver = null
+  restoreGeneration++
+  initGeneration++
   unsubStatus?.()
   window.removeEventListener('panel:reconnect', onReconnectEvent)
 
-  if (rfb && vncContainer.value && vncContainer.value.childElementCount > 0) {
+  const canCache = lifecycle.isOpen(props.panelId)
+    && !!rfb
+    && !!vncContainer.value
+    && vncContainer.value.childElementCount > 0
+  if (canCache && vncContainer.value) {
     const container = document.createElement('div')
     container.style.display = 'none'
     const children = Array.from(vncContainer.value.children)
     children.forEach(child => container.appendChild(child))
     document.body.appendChild(container)
     panelStore.setVNCCache(props.panelId, { rfb, container })
-  } else if (rfb) {
-    rfb.disconnect()
+    clientTransferredToCache = true
+    releaseClient()
+    rfb = null
+  } else {
+    releaseClient()
     rfb = null
   }
+
+  themeObserver?.disconnect()
+  themeObserver = null
 })
 
 watch(() => props.sessionId, (newId) => {
   if (newId && !currentSessionId.value) {
     currentSessionId.value = newId
+    void restoreExistingSession()
   }
 })
 

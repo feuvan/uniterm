@@ -10,6 +10,9 @@ const { createSessionMock, recordRecentMock } = vi.hoisted(() => ({
 }))
 
 vi.mock('../../bindings/github.com/ys-ll/uniterm/app', () => ({
+  CloseSession: vi.fn(async () => {}),
+  SessionStart: vi.fn(async () => {}),
+  ListSessions: vi.fn(async () => []),
   CreateSession: createSessionMock,
   RecordRecentConnection: recordRecentMock,
   SaveConnections: vi.fn(async () => {}),
@@ -26,6 +29,9 @@ vi.mock('../services/message', () => ({
 import { useConnectionStore, migrateLegacyDatabaseTypes } from '../stores/connectionStore'
 import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
+import { useSessionStore } from '../stores/sessionStore'
+import { CloseSession } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { launchConnection, launchFileBrowser, configureLauncher } from './connectionLauncher'
 import { msg } from '../services/message'
 
@@ -37,7 +43,7 @@ function baseConfig(type: string): any {
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  createSessionMock.mockReset().mockImplementation(async (type: string) => ({ id: `sid-${type}` }))
+  createSessionMock.mockReset().mockImplementation(async (type: string) => ({ id: `sid-${type}`, type, title: type, status: 'connecting' }))
   recordRecentMock.mockReset()
   ensureCredentials.mockClear()
   configureLauncher({ ensureCredentials, closeStartAndReposition: () => () => {} })
@@ -53,7 +59,7 @@ describe('launchConnection persistence', () => {
     expect(recordRecentMock).not.toHaveBeenCalled()
     // Transient session still gets a stable id for panel/tab wiring.
     expect(cfg.id).toBeTruthy()
-    expect(createSessionMock).toHaveBeenCalledWith('sftp', cfg)
+    expect(createSessionMock).toHaveBeenCalledWith('sftp', expect.objectContaining(cfg))
   })
 
   it('connect (persist=true) adds the connection and records recent', async () => {
@@ -162,6 +168,24 @@ describe('launchFileBrowser', () => {
 })
 
 describe('session failure handling', () => {
+  it('does not roll back a newer reconnect when the original launch is cancelled', async () => {
+    let resolve!: (info: unknown) => void
+    createSessionMock.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const opening = launchConnection(baseConfig('sftp'))
+    await vi.waitFor(() => expect(createSessionMock).toHaveBeenCalledTimes(1))
+    const panels = [...usePanelStore().panels.values()]
+    const panel = panels[panels.length - 1]
+    createSessionMock.mockResolvedValueOnce({ id: 'replacement', type: 'sftp', title: '', status: 'connected' })
+    await usePanelLifecycle().createSession(panel.id, 'sftp', panel.config!)
+    resolve({ id: 'obsolete', type: 'sftp', title: '', status: 'connecting' })
+    await opening
+    expect(usePanelStore().getPanel(panel.id)?.sessionId).toBe('replacement')
+    expect(CloseSession).toHaveBeenCalledWith('obsolete')
+    expect(useSessionStore().sessions.has('obsolete')).toBe(false)
+    useTabStore().closeTab(panel.tabId)
+    await usePanelLifecycle().disposePanel(panel.id)
+  })
+
   // tabStore/panelState hold module-level reactive state that survives pinia
   // resets, so assertions use count deltas instead of absolute values.
   it('session-first types (vnc) roll back the panel and never open a tab', async () => {

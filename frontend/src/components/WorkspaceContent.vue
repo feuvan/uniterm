@@ -28,7 +28,6 @@ import { usePanelStore } from '../stores/panelStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { usePanelLifecycle } from '../services/panelLifecycle'
 import type { WorkspaceTab } from '../types/workspace'
-import { useCompanionStore } from '../stores/companionStore'
 import { useDuplicateSession } from '../composables/useDuplicateSession'
 import { ElMessageBox } from 'element-plus'
 import { useI18n } from '../i18n'
@@ -40,7 +39,6 @@ const props = defineProps<{
 const tabStore = useTabStore()
 const panelStore = usePanelStore()
 const sessionStore = useSessionStore()
-const companionStore = useCompanionStore()
 const lifecycle = usePanelLifecycle()
 const { t } = useI18n()
 const { duplicateSession } = useDuplicateSession()
@@ -59,9 +57,8 @@ async function closePanel(panelId: string) {
       return
     }
   }
-  await companionStore.disposeForPanel(panelId).catch(() => {})
-  await lifecycle.disposePanel(panelId)
   tabStore.removePanelFromWorkspaceTab(props.tab.id, panelId)
+  await lifecycle.disposePanel(panelId)
 }
 
 function onToggleAiLock(panelId: string) {

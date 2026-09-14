@@ -147,12 +147,16 @@ func (sm *SessionManager) List() []SessionInfo {
 
 	infos := make([]SessionInfo, 0, len(sm.sessions))
 	for _, s := range sm.sessions {
-		infos = append(infos, SessionInfo{
+		info := SessionInfo{
 			ID:     s.ID(),
 			Type:   s.Type(),
 			Title:  s.Title(),
 			Status: s.Status(),
-		})
+		}
+		if proxy, ok := s.(interface{ ProxyAddr() string }); ok {
+			info.ProxyAddr = proxy.ProxyAddr()
+		}
+		infos = append(infos, info)
 	}
 	return infos
 }

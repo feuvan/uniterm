@@ -139,6 +139,7 @@
     <ContainerDetailDrawer
       :mode="drawerMode"
       :tab-id="tab.id"
+      :panel-id="tab.panelId"
       :target="drawerTarget"
       @close="drawerMode = null"
     />
@@ -147,13 +148,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, ElTable, ElTableColumn } from 'element-plus'
 import { RefreshCw, SquareTerminal, ScrollText, Play, Square, Power, Pencil, Trash2 } from '@lucide/vue'
 import { useContainerStore } from '../stores/containerStore'
 import * as client from '../services/containerClient'
 import type { StreamHandle } from '../services/containerClient'
 import { useI18n } from '../i18n'
+import { isPanelLifecycleCancelled, usePanelLifecycle } from '../services/panelLifecycle'
 import ContainerDetailDrawer from './ContainerDetailDrawer.vue'
 import ContainerCreateDialog from './ContainerCreateDialog.vue'
 import type { ContainerImage, ContainerInfo, ContainerTab } from '../types/container'
@@ -223,6 +225,7 @@ async function openExec(c: ContainerInfo) {
   try {
     await store.openContainerExec(props.tab, c)
   } catch (e: any) {
+    if (isPanelLifecycleCancelled(e)) return
     ElMessage.error(String(e?.message || e))
   }
 }
@@ -291,26 +294,50 @@ const pullImage = ref('')
 const pulling = ref(false)
 const pullLines = ref<string[]>([])
 let pullHandle: StreamHandle | null = null
+let pullGeneration = 0
+const lifecycle = usePanelLifecycle()
+
+function stopPull() {
+  pullGeneration++
+  pullHandle?.stop()
+  pullHandle = null
+  pulling.value = false
+}
+
+const releasePull = lifecycle.registerResource(props.tab.panelId, stopPull)
 
 async function onPull() {
   const s = session.value
   const image = pullImage.value.trim()
-  if (!s || !image || pulling.value) return
+  if (!s || !image || pulling.value || s.loading || s.error) return
+  const generation = ++pullGeneration
+  const current = () => generation === pullGeneration
+    && lifecycle.isOpen(props.tab.panelId)
+    && session.value === s
   pullLines.value = []
   pulling.value = true
   try {
-    pullHandle = await client.startPull(s.connId, image,
-      (line) => pullLines.value.push(line),
+    const handle = await client.startPull(s.connId, image,
+      (line) => { if (current()) pullLines.value.push(line) },
       (err) => {
+        if (!current()) return
         pulling.value = false
         pullHandle = null
         if (err) ElMessage.error(err)
-        else store.loadImages(props.tab.id)
+        else void store.loadImages(props.tab.id)
       },
+      current,
     )
+    if (!current()) {
+      handle.stop()
+      return
+    }
+    pullHandle = handle
   } catch (e: any) {
-    pulling.value = false
-    ElMessage.error(String(e?.message || e))
+    if (!isPanelLifecycleCancelled(e) && current()) {
+      pulling.value = false
+      ElMessage.error(String(e?.message || e))
+    }
   }
 }
 
@@ -327,9 +354,14 @@ function onReconnectEvent(e: Event) {
 // Force-reconnect: close the current container connection, then re-open it
 // (open() re-initializes loading/error state and reconnects the client).
 async function reconnect() {
-  try { store.close(props.tab.id) } catch (_) {}
+  stopPull()
+  try { await store.close(props.tab.id) } catch (_) {}
   await store.open(props.tab)
 }
+
+watch(session, (next, previous) => {
+  if (next !== previous) stopPull()
+})
 
 onMounted(() => {
   store.open(props.tab)
@@ -337,8 +369,9 @@ onMounted(() => {
   window.addEventListener('panel:reconnect', onReconnectEvent)
 })
 onBeforeUnmount(() => {
+  releasePull()
+  stopPull()
   window.removeEventListener('panel:reconnect', onReconnectEvent)
-  pullHandle?.stop()
   store.close(props.tab.id)
 })
 </script>

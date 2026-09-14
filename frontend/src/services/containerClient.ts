@@ -10,7 +10,7 @@ import type {
   ContainerInfo, InspectResult, ContainerImage, ContainerStats as ContainerStatsInfo, ContainerCreateOptions,
 } from '../types/container'
 
-export const connect = (id: string) => ContainerConnect(id)
+export const connect = async (id: string): Promise<void> => { await ContainerConnect(id) }
 export const disconnect = (id: string) => ContainerDisconnect(id)
 export const list = (id: string) => ContainerList(id) as Promise<ContainerInfo[]>
 export const inspect = (id: string, cid: string) => ContainerInspect(id, cid) as Promise<InspectResult>
@@ -22,8 +22,11 @@ export const removeImage = (id: string, imageID: string) => ContainerRemoveImage
 export const create = (id: string, opts: ContainerCreateOptions) => ContainerCreate(id, opts as any)
 export const namespaces = (id: string) => ContainerNamespaces(id) as Promise<string[]>
 export const setNamespace = (connId: string, ns: string) => ContainerSetNamespace(connId, ns)
-export const execSession = (connId: string, cid: string, shell: string) =>
-  ContainerExecSession(connId, cid, shell)
+export const execSession = async (connId: string, cid: string, shell: string) => {
+  const info = await ContainerExecSession(connId, cid, shell)
+  if (!info?.id) throw new Error('Backend returned an empty container exec session')
+  return info
+}
 
 export interface StreamHandle {
   id: string
@@ -33,31 +36,55 @@ export interface StreamHandle {
 async function startStream(
   start: () => Promise<string>,
   onLine: (line: string) => void,
-  onEnd?: (err: string) => void
+  onEnd?: (err: string) => void,
+  isCurrent: () => boolean = () => true,
 ): Promise<StreamHandle> {
   const id = await start()
   const evName = `container:stream:${id}`
   const endName = `container:stream-end:${id}`
- Events.On(evName, (ev) => { const p: { line: string } = ev.data; return onLine(p?.line ?? '') })
- Events.On(endName, (ev) => { const p: { error: string } = ev.data; 
-    onEnd?.(p?.error || '')
+  let stopped = false
+  const removeListeners = () => {
     Events.Off(evName)
     Events.Off(endName)
-   })
-  return {
-    id,
-    stop: () => {
-      Events.Off(evName)
-      Events.Off(endName)
-      ContainerStopStream(id)
-    },
   }
+  const stop = () => {
+    if (stopped) return
+    stopped = true
+    removeListeners()
+    void ContainerStopStream(id)
+  }
+
+  // A panel can be closed while the backend is still creating the stream.
+  // Stop the late stream before registering callbacks or returning it to the
+  // caller, so it cannot survive the panel that requested it.
+  if (!isCurrent()) {
+    stop()
+    return { id, stop }
+  }
+
+  Events.On(evName, (ev) => {
+    if (!stopped && isCurrent()) {
+      const p: { line: string } = ev.data
+      onLine(p?.line ?? '')
+    }
+  })
+  Events.On(endName, (ev) => {
+    if (stopped) return
+    stopped = true
+    const p: { error: string } = ev.data
+    try {
+      if (isCurrent()) onEnd?.(p?.error || '')
+    } finally {
+      removeListeners()
+    }
+  })
+  return { id, stop }
 }
 
 export const startLogs = (connId: string, cid: string, tail: number, timestamps: boolean,
-  onLine: (l: string) => void, onEnd?: (e: string) => void) =>
-  startStream(() => ContainerStartLogs(connId, cid, tail, timestamps), onLine, onEnd)
+  onLine: (l: string) => void, onEnd?: (e: string) => void, isCurrent?: () => boolean) =>
+  startStream(() => ContainerStartLogs(connId, cid, tail, timestamps), onLine, onEnd, isCurrent)
 
 export const startPull = (connId: string, image: string,
-  onLine: (l: string) => void, onEnd?: (e: string) => void) =>
-  startStream(() => ContainerStartPull(connId, image), onLine, onEnd)
+  onLine: (l: string) => void, onEnd?: (e: string) => void, isCurrent?: () => boolean) =>
+  startStream(() => ContainerStartPull(connId, image), onLine, onEnd, isCurrent)

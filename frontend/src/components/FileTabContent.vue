@@ -176,9 +176,10 @@ import { useI18n } from '../i18n'
 import {
   SftpListRemote, SftpListLocal, SftpListLocalDrives,
   SftpChangeRemoteDir, SftpChangeLocalDir,
-  SftpOpenExternalEditor, OpenExternalEditorLocal, ListSessions,
+  SftpOpenExternalEditor, OpenExternalEditorLocal,
   SftpOpenWithSystem, OpenWithSystemLocal,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { backendSessionApi } from '../services/backendSessionApi'
 
 import FileList from './FileList.vue'
 import TransferPanel from './TransferPanel.vue'
@@ -193,6 +194,7 @@ import {
   resolveRemoteTarget, resolveLocalTarget, joinPath,
 } from '../composables/useFilePanel'
 import { reconnectFileTransferPanel, isPanelReconnecting } from '../composables/usePanelReconnect'
+import { isPanelLifecycleCancelled } from '../services/panelLifecycle'
 import { isConnectionLostError, supportsRemoteSymlink } from '../utils/fileTransferUtils'
 import { bindExtEditUploadedToast } from '../composables/useFilePanel'
 import { Events } from '@wailsio/runtime'
@@ -301,7 +303,7 @@ async function onRemoteListError(err: string): Promise<boolean> {
   if (!panel?.config) return false
   let connected = false
   try {
-    const sessions = await ListSessions()
+    const sessions = await backendSessionApi.listSessions()
     connected = sessions.find(s => s.id === panel.sessionId)?.status === 'connected'
   } catch { /* status unknown — treat as disconnected */ }
   if (connected && !isConnectionLostError(err)) return false
@@ -313,6 +315,7 @@ async function onRemoteListError(err: string): Promise<boolean> {
     if (newId) onRefreshRemote()
     else msg.error(t('tab.reconnectFailed'))
   } catch (e: any) {
+    if (isPanelLifecycleCancelled(e)) return true
     msg.error(`${t('tab.reconnectFailed')}: ${e?.message || String(e)}`)
   }
   return true
@@ -474,7 +477,7 @@ async function probeConnectAndLoad() {
   const sid = panel.value?.sessionId
   if (!sid) return
   try {
-    const sessions = await ListSessions()
+    const sessions = await backendSessionApi.listSessions()
     const sess = sessions.find(s => s.id === sid)
     if (sess && sess.status === 'connected') {
       probeRan = true

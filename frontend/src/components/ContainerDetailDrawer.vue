@@ -65,6 +65,7 @@ import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { ElButton, ElIcon, ElMessage, ElSelect, ElOption, ElCheckbox } from 'element-plus'
 import { Close } from '@element-plus/icons-vue'
 import { useContainerStore } from '../stores/containerStore'
+import { usePanelLifecycle, isPanelLifecycleCancelled } from '../services/panelLifecycle'
 import * as client from '../services/containerClient'
 import type { StreamHandle } from '../services/containerClient'
 import { useI18n } from '../i18n'
@@ -72,12 +73,19 @@ import Menu from './Menu.vue'
 import MenuItem from './MenuItem.vue'
 import { Clipboard } from '@wailsio/runtime'
 import type { ContainerDetail, ContainerInfo, InspectResult } from '../types/container'
+import type { ContainerSession } from '../stores/containerStore'
 
-const props = defineProps<{ mode: 'detail' | 'logs' | null; tabId: string; target: ContainerInfo | null }>()
+const props = defineProps<{
+  mode: 'detail' | 'logs' | null
+  tabId: string
+  panelId: string
+  target: ContainerInfo | null
+}>()
 defineEmits<{ (e: 'close'): void }>()
 
 const { t } = useI18n()
 const store = useContainerStore()
+const lifecycle = usePanelLifecycle()
 
 // Right-click "复制" on selectable log text — shows only when something is
 // selected; positioned at the pointer (Menu.openAt, viewport-adaptive).
@@ -217,24 +225,41 @@ function splitLogLine(line: string): { ts: string; msg: string } {
 }
 
 function stopLogs() { logGen++; logHandle?.stop(); logHandle = null }
+const releaseLogStream = lifecycle.registerResource(props.panelId, stopLogs)
+
 async function restartLogs() {
   stopLogs()
   const myGen = ++logGen
+  const targetId = props.target?.id
   logLines.value = []
-  if (props.mode !== 'logs' || !props.target) return
-  const connId = store.sessions[props.tabId]?.connId
-  if (!connId) return
-  const handle = await client.startLogs(connId, props.target.id, logTail.value, logTimestamps.value,
-    (line) => {
-      if (logPaused.value) return
-      logLines.value.push(splitLogLine(line))
-      if (logLines.value.length > 5000) logLines.value.splice(0, logLines.value.length - 5000)
-      nextTick(() => { if (logBody.value) logBody.value.scrollTop = logBody.value.scrollHeight })
-    },
-    () => {},
-  )
-  if (myGen !== logGen || props.mode !== 'logs' || !props.target) { handle.stop(); return }
-  logHandle = handle
+  if (props.mode !== 'logs' || !targetId) return
+  const session = containerSession.value
+  if (!session || session.loading || session.error) return
+  const connId = session.connId
+  const current = () => myGen === logGen
+    && lifecycle.isOpen(props.panelId)
+    && props.mode === 'logs'
+    && props.target?.id === targetId
+    && store.sessions[props.tabId] === session
+    && store.sessions[props.tabId]?.connId === connId
+  try {
+    const handle = await client.startLogs(connId, targetId, logTail.value, logTimestamps.value,
+      (line) => {
+        if (!current() || logPaused.value) return
+        logLines.value.push(splitLogLine(line))
+        if (logLines.value.length > 5000) logLines.value.splice(0, logLines.value.length - 5000)
+        nextTick(() => { if (current() && logBody.value) logBody.value.scrollTop = logBody.value.scrollHeight })
+      },
+      () => {},
+      current,
+    )
+    if (!current()) { handle.stop(); return }
+    logHandle = handle
+  } catch (e) {
+    if (current() && !isPanelLifecycleCancelled(e)) {
+      ElMessage.error(String((e as any)?.message || e))
+    }
+  }
 }
 
 watch(() => [props.mode, props.target], () => {
@@ -246,7 +271,29 @@ watch(() => [props.mode, props.target], () => {
   else stopLogs()
 })
 
-onBeforeUnmount(stopLogs)
+const containerSession = computed<ContainerSession | undefined>(() => store.sessions[props.tabId])
+
+watch(containerSession, (next, previous) => {
+  if (next === previous) return
+  stopLogs()
+  if (props.mode === 'logs' && props.target && next && !next.loading && !next.error) {
+    void restartLogs()
+  }
+})
+
+watch(() => containerSession.value?.loading, (loading, previous) => {
+  if (loading === previous) return
+  stopLogs()
+  const session = containerSession.value
+  if (props.mode === 'logs' && props.target && session && !loading && !session.error) {
+    void restartLogs()
+  }
+})
+
+onBeforeUnmount(() => {
+  releaseLogStream()
+  stopLogs()
+})
 </script>
 
 <style scoped>

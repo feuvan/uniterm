@@ -107,5 +107,7 @@ export async function startLogStream(
 }
 
 export async function execSession(connId: string, ns: string, pod: string, container: string) {
-  return await K8sExecSession(connId, ns, pod, container)
+  const info = await K8sExecSession(connId, ns, pod, container)
+  if (!info?.id) throw new Error('Backend returned an empty Kubernetes exec session')
+  return info
 }

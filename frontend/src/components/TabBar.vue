@@ -63,13 +63,15 @@ import { MoreHorizontal } from '@lucide/vue'
 import { useTabStore } from '../stores/tabStore'
 import { usePanelStore } from '../stores/panelStore'
 import { useI18n } from '../i18n'
-import { SftpCancelTransfer, CloseSession, RDPHide } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { SftpCancelTransfer, RDPHide } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import TabItem from './TabItem.vue'
 import Menu from './Menu.vue'
 import MenuItem from './MenuItem.vue'
 
 const tabStore = useTabStore()
 const panelStore = usePanelStore()
+const lifecycle = usePanelLifecycle()
 const { t } = useI18n()
 const tabs = computed(() => tabStore.tabs)
 const activeTabId = computed(() => tabStore.activeTabId)
@@ -150,25 +152,14 @@ async function closeTab(id: string) {
     }
   }
 
-  // Clean up RDP session: hide window first, then close Go-side resources
+  // Hide the native RDP window before the shared disposer removes the panel.
   if (tab && tab.type === 'rdp') {
     const rdpPanel = panelStore.getPanel(tab.panelId)
-    if (rdpPanel?.sessionId) {
-      await RDPHide(rdpPanel.sessionId)
-      try { await CloseSession(rdpPanel.sessionId) } catch (_) {}
-    }
-  }
-
-  // Clean up VNC session
-  if (tab && tab.type === 'vnc') {
-    const vncPanel = panelStore.getPanel(tab.panelId)
-    if (vncPanel?.sessionId) {
-      try { await CloseSession(vncPanel.sessionId) } catch (_) {}
-    }
+    if (rdpPanel?.sessionId) await RDPHide(rdpPanel.sessionId).catch(() => {})
   }
 
   const panelIds = tabStore.closeTab(id)
-  panelIds.forEach(pid => panelStore.removePanel(pid))
+  await lifecycle.disposePanels(panelIds)
 }
 
 function onToggleAiLock(panelId: string) {

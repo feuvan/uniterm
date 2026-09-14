@@ -3,7 +3,7 @@ import * as client from '../services/containerClient'
 import { usePanelStore } from './panelStore'
 import { useTabStore } from './tabStore'
 import { useSessionStore } from './sessionStore'
-import { usePanelLifecycle } from '../services/panelLifecycle'
+import { isPanelLifecycleCancelled, usePanelLifecycle } from '../services/panelLifecycle'
 import type { ContainerTab, ContainerInfo, ContainerImage, InspectResult } from '../types/container'
 
 export interface ContainerSession {
@@ -18,12 +18,16 @@ export interface ContainerSession {
   error: string
 }
 
-const resourceReleases = new Map<string, () => void>()
+const resourceReleases = new Map<string, () => Promise<void>>()
+const connectionOperations = new Map<string, Promise<void>>()
 
 export const useContainerStore = defineStore('container', {
   state: () => ({ sessions: {} as Record<string, ContainerSession> }),
   actions: {
     async open(tab: ContainerTab) {
+      const previous = connectionOperations.get(tab.id)
+      if (previous) await previous.catch(() => {})
+      await resourceReleases.get(tab.id)?.()
       this.sessions[tab.id] = {
         connId: tab.connectionId, runtime: tab.runtime,
         containers: [], images: [], namespaces: [], namespace: 'default',
@@ -31,30 +35,45 @@ export const useContainerStore = defineStore('container', {
       }
       // 读回响应式代理再操作：直接改闭包里的原始对象不会触发视图更新
       const s = this.sessions[tab.id]
-      try {
-        await client.connect(tab.connectionId)
-        if (this.sessions[tab.id] !== s) {
-          // 连接期间 tab 已关闭：回收后端连接
-          client.disconnect(tab.connectionId)
-          return
-        }
-        const lifecycle = usePanelLifecycle()
-        const release = lifecycle.registerResource(tab.panelId, () => {
-          const current = this.sessions[tab.id]
-          if (current === s) {
-            client.disconnect(s.connId)
-            delete this.sessions[tab.id]
+      const lifecycle = usePanelLifecycle()
+      let unregister = () => {}
+      let released = false
+      const release = async () => {
+        if (released) return
+        released = true
+        unregister()
+        if (resourceReleases.get(tab.id) === release) resourceReleases.delete(tab.id)
+        if (this.sessions[tab.id] !== s) return
+        delete this.sessions[tab.id]
+        await Promise.resolve(client.disconnect(s.connId)).catch(() => {})
+      }
+      unregister = lifecycle.registerResource(tab.panelId, release)
+      resourceReleases.set(tab.id, release)
+
+      // Container manager ids are connection ids, not per-attempt handles.
+      // Serialize opens so a late old Connect/Disconnect cannot close a newer
+      // connection with the same id during rapid reconnects.
+      const opening = Promise.resolve(previous).catch(() => {}).then(async () => {
+        if (!lifecycle.isOpen(tab.panelId) || this.sessions[tab.id] !== s) return
+        try {
+          await client.connect(tab.connectionId)
+          if (!lifecycle.isOpen(tab.panelId) || this.sessions[tab.id] !== s) {
+            await client.disconnect(tab.connectionId)
+            return
           }
-        })
-        resourceReleases.set(tab.id, release)
-        await this.refresh(tab.id)
-        if (tab.runtime === 'nerdctl') {
-          this.loadNamespaces(tab.id)
+          await this.refresh(tab.id)
+          if (tab.runtime === 'nerdctl') await this.loadNamespaces(tab.id)
+        } catch (e: any) {
+          s.error = e?.message || String(e)
+        } finally {
+          s.loading = false
         }
-      } catch (e: any) {
-        s.error = e?.message || String(e)
+      })
+      connectionOperations.set(tab.id, opening)
+      try {
+        await opening
       } finally {
-        s.loading = false
+        if (connectionOperations.get(tab.id) === opening) connectionOperations.delete(tab.id)
       }
     },
     async refresh(tabId: string) {
@@ -136,17 +155,19 @@ export const useContainerStore = defineStore('container', {
         const termTab = tabStore.createTerminalTab(panel.title, panel.id)
         panelStore.movePanelToTab(panel.id, termTab.id)
       } catch (error) {
-        await lifecycle.disposePanel(panel.id)
+        if (!isPanelLifecycleCancelled(error)) await lifecycle.disposePanel(panel.id)
         throw error
       }
     },
     close(tabId: string) {
-      resourceReleases.get(tabId)?.()
-      resourceReleases.delete(tabId)
+      const release = resourceReleases.get(tabId)
+      if (release) {
+        return release().catch(() => {})
+      }
       const s = this.sessions[tabId]
       if (!s) return
-      client.disconnect(s.connId)
       delete this.sessions[tabId]
+      return Promise.resolve(client.disconnect(s.connId)).catch(() => {})
     },
   },
 })

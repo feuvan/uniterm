@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { CreateSession, CloseSession, ListSessions } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { backendSessionApi } from '../services/backendSessionApi'
 import { usePanelStore } from './panelStore'
 import { useSessionStore } from './sessionStore'
 import { useTabStore } from './tabStore'
+import { isPanelLifecycleCancelled, usePanelLifecycle } from '../services/panelLifecycle'
 import { useConnectionStore } from './connectionStore'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 import { unregisterTransferRoute } from '../services/transferTaskCenter'
@@ -57,6 +58,10 @@ export const useCompanionStore = defineStore('companion', () => {
   const panelStore = usePanelStore()
   const sessionStore = useSessionStore()
   const tabStore = useTabStore()
+  const lifecycle = usePanelLifecycle()
+  const pendingSftp = new Map<string, Promise<string | null>>()
+  const pendingMonitor = new Map<string, Promise<string | null>>()
+  const resourceReleases = new Map<string, () => void>()
 
   function getActiveSshPanelId(): string | null {
     const pid = tabStore.getActivePanelId()
@@ -131,17 +136,16 @@ export const useCompanionStore = defineStore('companion', () => {
   function ensureEntry(sshPanelId: string): CompanionEntry {
     if (!entries.value[sshPanelId]) {
       entries.value[sshPanelId] = {}
+      resourceReleases.set(sshPanelId, lifecycle.registerResource(sshPanelId, () => disposeForPanel(sshPanelId)))
     }
     return entries.value[sshPanelId]
   }
 
   function cloneConfig(config: ConnectionConfig): ConnectionConfig {
-    // SSH panels keep deferConnect=true so the PTY starts after xterm measures
-    // size. Companion SFTP/monitor sessions must connect immediately — otherwise
-    // CreateSession returns and never launches Connect().
+    // Companion sessions connect immediately; terminal deferral is selected
+    // by the backend session type and does not need a frontend flag.
     return {
       ...config,
-      deferConnect: false,
       initialCols: 0,
       initialRows: 0,
     }
@@ -163,7 +167,7 @@ export const useCompanionStore = defineStore('companion', () => {
   async function sessionAlive(sessionId: string | undefined): Promise<boolean> {
     if (!sessionId) return false
     try {
-      const sessions = await ListSessions()
+      const sessions = await backendSessionApi.listSessions()
       const sess = sessions.find(s => s.id === sessionId)
       return sess?.status === 'connected' || sess?.status === 'connecting'
     } catch {
@@ -172,98 +176,63 @@ export const useCompanionStore = defineStore('companion', () => {
     }
   }
 
-  async function ensureSftp(sshPanelId: string): Promise<string | null> {
-    const config = resolveConfig(sshPanelId)
-    if (!config) return null
-    const entry = ensureEntry(sshPanelId)
-    if (entry.sftpSessionId && await sessionAlive(entry.sftpSessionId)) {
-      return entry.sftpSessionId
-    }
-    if (entry.sftpSessionId) {
-      unregisterTransferRoute(entry.sftpSessionId)
-      try { await CloseSession(entry.sftpSessionId) } catch { /* ignore */ }
-      entry.sftpSessionId = undefined
-    }
-    if (entry.creatingSftp) {
-      for (let i = 0; i < 50; i++) {
-        await new Promise(r => setTimeout(r, 100))
-        if (entry.sftpSessionId) return entry.sftpSessionId
-        if (!entry.creatingSftp) break
-      }
-      return entry.sftpSessionId ?? null
-    }
-    entry.creatingSftp = true
-    try {
-      // WSL terminals have no SFTP subsystem — their file sidebar is served by
-      // the WSL file session over \\wsl.localhost\<distro>.
-      if (isWslPanel(sshPanelId)) {
-        config.type = 'wsl-file'
-        const info = await CreateSession('wsl-file', config)
-        entries.value = {
-          ...entries.value,
-          [sshPanelId]: { ...entries.value[sshPanelId], sftpSessionId: info.id, creatingSftp: false },
-        }
-        sessionStore.initSession(info.id)
-        return info.id
-      }
-      // Honor the connection's file-transfer protocol preference: 'scp' for
-      // hosts without an SFTP subsystem, 'sftp' (default) otherwise.
-      const proto = fileTransferProto(config)
-      config.type = proto
-      const info = await CreateSession(proto, config)
-      entries.value = {
-        ...entries.value,
-        [sshPanelId]: { ...entries.value[sshPanelId], sftpSessionId: info.id, creatingSftp: false },
-      }
-      sessionStore.initSession(info.id)
-      return info.id
-    } catch (e) {
-      console.error('companion sftp create failed:', e)
-      entries.value = {
-        ...entries.value,
-        [sshPanelId]: { ...entries.value[sshPanelId], creatingSftp: false },
-      }
-      return null
-    }
+  function ensureSftp(sshPanelId: string): Promise<string | null> {
+    return ensureCompanion(sshPanelId, 'sftp', pendingSftp)
   }
 
-  async function ensureMonitor(sshPanelId: string): Promise<string | null> {
-    const config = resolveConfig(sshPanelId)
-    if (!config) return null
-    const entry = ensureEntry(sshPanelId)
-    if (entry.monitorSessionId && await sessionAlive(entry.monitorSessionId)) {
-      return entry.monitorSessionId
-    }
-    if (entry.monitorSessionId) {
-      try { await CloseSession(entry.monitorSessionId) } catch { /* ignore */ }
-      entry.monitorSessionId = undefined
-    }
-    if (entry.creatingMonitor) {
-      for (let i = 0; i < 50; i++) {
-        await new Promise(r => setTimeout(r, 100))
-        if (entry.monitorSessionId) return entry.monitorSessionId
-        if (!entry.creatingMonitor) break
+  function ensureMonitor(sshPanelId: string): Promise<string | null> {
+    return ensureCompanion(sshPanelId, 'monitor', pendingMonitor)
+  }
+
+  function ensureCompanion(
+    panelId: string,
+    kind: 'sftp' | 'monitor',
+    pending: Map<string, Promise<string | null>>,
+  ): Promise<string | null> {
+    const inflight = pending.get(panelId)
+    if (inflight) return inflight
+    const config = resolveConfig(panelId)
+    if (!config || !lifecycle.isOpen(panelId)) return Promise.resolve(null)
+    const entry = ensureEntry(panelId)
+    const sessionKey = kind === 'sftp' ? 'sftpSessionId' : 'monitorSessionId'
+    const creatingKey = kind === 'sftp' ? 'creatingSftp' : 'creatingMonitor'
+    const current = () => entries.value[panelId] === entry && lifecycle.isOpen(panelId)
+    entry[creatingKey] = true
+
+    // Store the actual promise, not a boolean plus polling on an entry object
+    // that might have been replaced by another request. Concurrent callers all
+    // receive the same result, even when IPC takes more than five seconds.
+    const attempt = Promise.resolve().then(async () => {
+      const oldId = entry[sessionKey]
+      if (oldId && await sessionAlive(oldId)) return current() ? oldId : null
+      if (!current()) return null
+      if (oldId) {
+        entry[sessionKey] = undefined
+        await lifecycle.disposeOwnedSession(panelId, oldId)
       }
-      return entry.monitorSessionId ?? null
-    }
-    entry.creatingMonitor = true
-    try {
-      config.type = 'monitor'
-      const info = await CreateSession('monitor', config)
-      entries.value = {
-        ...entries.value,
-        [sshPanelId]: { ...entries.value[sshPanelId], monitorSessionId: info.id, creatingMonitor: false },
+      if (!current()) return null
+      config.type = kind === 'monitor' ? 'monitor'
+        : isWslPanel(panelId) ? 'wsl-file' : fileTransferProto(config)
+      const session = await lifecycle.createChildSession(panelId, config.type, config)
+      // disposeForPanel may run independently of closing the owner (e.g. a
+      // sidebar reset). Never recreate its entry from a late child result.
+      if (!current()) {
+        await lifecycle.disposeOwnedSession(panelId, session.id)
+        return null
       }
-      sessionStore.initSession(info.id)
-      return info.id
-    } catch (e) {
-      console.error('companion monitor create failed:', e)
-      entries.value = {
-        ...entries.value,
-        [sshPanelId]: { ...entries.value[sshPanelId], creatingMonitor: false },
+      entry[sessionKey] = session.id
+      return session.id
+    }).catch((error: unknown) => {
+      if (current() && !isPanelLifecycleCancelled(error)) {
+        console.error(`companion ${kind} create failed:`, error)
       }
       return null
-    }
+    }).finally(() => {
+      if (pending.get(panelId) === attempt) pending.delete(panelId)
+      if (current()) entry[creatingKey] = false
+    })
+    pending.set(panelId, attempt)
+    return attempt
   }
 
   async function toggleFiles() {
@@ -298,6 +267,10 @@ export const useCompanionStore = defineStore('companion', () => {
   }
 
   async function disposeForPanel(sshPanelId: string) {
+    resourceReleases.get(sshPanelId)?.()
+    resourceReleases.delete(sshPanelId)
+    pendingSftp.delete(sshPanelId)
+    pendingMonitor.delete(sshPanelId)
     const entry = entries.value[sshPanelId]
     // Drop companion view caches together with the panel's sessions.
     if (fileViewCache.value[sshPanelId]) {
@@ -307,17 +280,17 @@ export const useCompanionStore = defineStore('companion', () => {
       delete monitorViewCache.value[sshPanelId]
     }
     delete followPathByPanel.value[sshPanelId]
+    panelStore.removeTransferTasks(sftpTransferKeyOf(sshPanelId))
     if (!entry) return
     const sftpId = entry.sftpSessionId
     const monitorId = entry.monitorSessionId
     delete entries.value[sshPanelId]
     if (sftpId) {
-      try { await CloseSession(sftpId) } catch { /* ignore */ }
+      await lifecycle.disposeOwnedSession(sshPanelId, sftpId)
       unregisterTransferRoute(sftpId)
-      panelStore.removeTransferTasks(sftpTransferKeyOf(sshPanelId))
     }
     if (monitorId) {
-      try { await CloseSession(monitorId) } catch { /* ignore */ }
+      await lifecycle.disposeOwnedSession(sshPanelId, monitorId)
     }
   }
 
@@ -338,6 +311,7 @@ export const useCompanionStore = defineStore('companion', () => {
   }
 
   function setFileViewCache(sshPanelId: string, cache: FileViewCache) {
+    if (!entries.value[sshPanelId] || !lifecycle.isOpen(sshPanelId)) return
     fileViewCache.value = { ...fileViewCache.value, [sshPanelId]: cache }
   }
 
@@ -346,6 +320,7 @@ export const useCompanionStore = defineStore('companion', () => {
   }
 
   function setMonitorViewCache(sshPanelId: string, cache: MonitorViewCache) {
+    if (!entries.value[sshPanelId] || !lifecycle.isOpen(sshPanelId)) return
     monitorViewCache.value = { ...monitorViewCache.value, [sshPanelId]: cache }
   }
 

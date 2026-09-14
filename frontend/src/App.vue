@@ -198,7 +198,6 @@ import { useTabStore } from './stores/tabStore'
 import { usePanelStore } from './stores/panelStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useAIStore } from './stores/aiStore'
-import { useCompanionStore } from './stores/companionStore'
 import { useSettingsStore } from './stores/settingsStore'
 import { useQuickCommandStore } from './stores/quickCommandStore'
 import { useSkillStore } from './stores/skillStore'
@@ -216,9 +215,8 @@ import type { ShortcutAction } from './types/settings'
 import { useI18n } from './i18n'
 import { RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
 import { waitForTerminalSize } from './services/terminalManager'
-import { usePanelLifecycle } from './services/panelLifecycle'
+import { isPanelLifecycleCancelled, usePanelLifecycle } from './services/panelLifecycle'
 import { msg } from './services/message'
-import { unregisterTransferRoute } from './services/transferTaskCenter'
 import type { ConnectionConfig } from './types/session'
 import { Application, Clipboard, Events } from '@wailsio/runtime'
 import { parseQuickConnect } from './utils/quickConnect'
@@ -272,7 +270,6 @@ const panelStore = usePanelStore()
 const sessionStore = useSessionStore()
 const { duplicateSession } = useDuplicateSession()
 const aiStore = useAIStore()
-const companionStore = useCompanionStore()
 const settingsStore = useSettingsStore()
 const localStateStore = useLocalStateStore()
 const lifecycle = usePanelLifecycle()
@@ -1028,14 +1025,12 @@ const actionHandlers: Record<ShortcutAction, () => void> = {
     if (t.locked) return
     if (t.type === 'workspace' && t.panelIds.length > 1) {
       const panelId = t.activePanelId || t.panelIds[t.panelIds.length - 1]
-      await lifecycle.disposePanel(panelId)
-      await companionStore.disposeForPanel(panelId).catch(() => {})
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
+      await lifecycle.disposePanel(panelId)
     } else if (t.type === 'workspace' && t.panelIds.length === 1) {
       const panelId = t.panelIds[0]
-      await lifecycle.disposePanel(panelId)
-      await companionStore.disposeForPanel(panelId).catch(() => {})
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
+      await lifecycle.disposePanel(panelId)
     } else {
       await closeTab(t.id)
     }
@@ -1195,18 +1190,6 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
   // connections and caches) are registered with PanelLifecycle. Closing the
   // tab only resolves its panel ids; lifecycle owns the disposal order.
   const panelIds = tabStore.closeTab(tabId)
-  // Dispose SSH companion sidebars (sftp/monitor) before removing their owner
-  // panels. Their child resources will be moved into the shared lifecycle in a
-  // later phase.
-  companionStore.disposeForPanels(panelIds).catch(() => {})
-  panelIds.forEach(pid => {
-    // Drop transfer-event routing and the panel's task list at close time —
-    // KeepAlive may keep the tab component cached, so its onUnmounted (if any)
-    // can run much later or never.
-    const p = panelStore.getPanel(pid)
-    if (p?.sessionId) unregisterTransferRoute(p.sessionId)
-    panelStore.removeTransferTasks(pid)
-  })
   await lifecycle.disposePanels(panelIds)
   nextTick(() => {
     if (tabStore.tabs.length === 0) {
@@ -1359,7 +1342,12 @@ async function connectTerminalSession(config: ConnectionConfig, persist: boolean
   // Create the panel before the backend session so lifecycle ownership starts
   // before the first async IPC call. The panel is still not mounted until its
   // session has been bound, preserving the terminal resize ordering.
-  const panel = panelStore.createPanel(config, config.type)
+  const panelType = config.type
+  switch (panelType) {
+    case 'ssh': case 'telnet': case 'mosh': case 'local': case 'wsl': case 'tcp': case 'serial': break
+    default: throw new Error(`Unsupported terminal session type: ${panelType}`)
+  }
+  const panel = panelStore.createPanel(config, panelType)
   const displayTitle = config.name || (config.type === 'local' || config.type === 'wsl'
     ? getShellLabel(config.shellPath)
     : config.type === 'serial'
@@ -1378,6 +1366,7 @@ async function connectTerminalSession(config: ConnectionConfig, persist: boolean
     })
     sessionId = info.id
   } catch (e) {
+    if (isPanelLifecycleCancelled(e)) return
     console.error('Failed to create session:', e)
     await lifecycle.disposePanel(panel.id)
     return
@@ -1404,7 +1393,7 @@ async function connectTerminalSession(config: ConnectionConfig, persist: boolean
   try {
     await lifecycle.startSession(panel.id, sessionId, config)
   } catch (e) {
-    console.error('Failed to start session:', e)
+    if (!isPanelLifecycleCancelled(e)) console.error('Failed to start session:', e)
   }
 }
 
@@ -1425,6 +1414,7 @@ async function reconnectDatabasePanel(panel: { id: string; sessionId: string | n
     await lifecycle.disposeSession(panel.id)
     await lifecycle.createSession(panel.id, sessionType, cfg)
   } catch (e: any) {
+    if (isPanelLifecycleCancelled(e)) return
     panelStore.updateStatus(panel.id, 'error')
     msg.error(`${t('db.connectFailed')}: ${e?.message || String(e)}`)
   }
@@ -1439,6 +1429,7 @@ async function reconnectMonitorPanel(panel: { id: string; sessionId: string | nu
     await lifecycle.disposeSession(panel.id)
     await lifecycle.createSession(panel.id, 'monitor', cfg)
   } catch (e: any) {
+    if (isPanelLifecycleCancelled(e)) return
     panelStore.updateStatus(panel.id, 'error')
     msg.error(`${t('tab.reconnectFailed')}: ${e?.message || String(e)}`)
   }
@@ -1452,6 +1443,7 @@ async function reconnectSftpPanel(panel: { id: string; sessionId: string | null;
     const newId = await reconnectFileTransferPanel(panel.id)
     if (!newId) panelStore.updateStatus(panel.id, 'error')
   } catch (e: any) {
+    if (isPanelLifecycleCancelled(e)) return
     panelStore.updateStatus(panel.id, 'error')
     msg.error(`${t('tab.reconnectFailed')}: ${e?.message || String(e)}`)
   }
@@ -1474,7 +1466,7 @@ function onPanelReconnectEvent(e: Event) {
   else if (panel.type === 'sftp') reconnectSftpPanel(panel)
 }
 
-function getShellLabel(path: string): string {
+function getShellLabel(path?: string): string {
   return getShellLabelBase(path, 'Local')
 }
 
@@ -1575,9 +1567,10 @@ async function createLocalTerminal(shellPath?: string, keepOpen?: boolean) {
     try {
       await lifecycle.startSession(panel.id, info.id, config)
     } catch (e) {
-      console.error('Failed to start local session:', e)
+      if (!isPanelLifecycleCancelled(e)) console.error('Failed to start local session:', e)
     }
   } catch (e) {
+    if (isPanelLifecycleCancelled(e)) return
     console.error('Failed to create local terminal:', e)
     await lifecycle.disposePanel(panel.id)
   }
@@ -1623,9 +1616,10 @@ async function createWslTerminal(distro: string, keepOpen?: boolean) {
     try {
       await lifecycle.startSession(panel.id, info.id, config)
     } catch (e) {
-      console.error('Failed to start wsl session:', e)
+      if (!isPanelLifecycleCancelled(e)) console.error('Failed to start wsl session:', e)
     }
   } catch (e) {
+    if (isPanelLifecycleCancelled(e)) return
     console.error('Failed to create wsl terminal:', e)
     await lifecycle.disposePanel(panel.id)
   }

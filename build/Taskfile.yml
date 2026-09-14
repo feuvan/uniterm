@@ -180,10 +180,12 @@ tasks:
     run: once
     deps:
       - task: go:mod:tidy
+      - task: install:frontend:deps
     sources:
       - "**/*.[jt]s"
       - exclude: frontend/**/*
       - frontend/bindings/**/*  # Rerun when switching between dev/production mode causes changes in output
+      - frontend/scripts/generate-binding-types.mjs
       - "**/*.go"
       - go.mod
       - go.sum
@@ -194,6 +196,9 @@ tasks:
       # (e.g. `new SyncConfig()`), so generate class-style JS bindings rather than
       # the `-ts -i` interface default.
       - wails3 generate bindings -f '{{.BUILD_FLAGS}}' -clean=true{{if eq .OBFUSCATED "true"}} -obfuscated{{end}}
+      - task: frontend:run
+        vars:
+          SCRIPT: bindings:types
 
   generate:icons:
     summary: Generates Windows `.ico` and Mac `.icns` from an image; on macOS, `-iconcomposerinput appicon.icon -macassetdir darwin` also produces `Assets.car` from a `.icon` file (skipped on other platforms).

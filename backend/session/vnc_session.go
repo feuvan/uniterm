@@ -2,10 +2,12 @@ package session
 
 import (
 	"fmt"
+	"sync"
 )
 
 type VNCSession struct {
 	baseSession
+	proxyMu   sync.RWMutex
 	proxy     *VNCProxy
 	proxyAddr string
 }
@@ -40,8 +42,10 @@ func (s *VNCSession) Connect(config ConnectionConfig) error {
 		return fmt.Errorf("vnc proxy start: %w", err)
 	}
 
+	s.proxyMu.Lock()
 	s.proxy = proxy
 	s.proxyAddr = addr
+	s.proxyMu.Unlock()
 
 	// Set connected immediately so frontend gets proxyAddr.
 	// The actual VNC handshake happens between noVNC and the VNC server
@@ -52,9 +56,13 @@ func (s *VNCSession) Connect(config ConnectionConfig) error {
 }
 
 func (s *VNCSession) Disconnect() error {
-	if s.proxy != nil {
-		s.proxy.Stop()
-		s.proxy = nil
+	s.proxyMu.Lock()
+	proxy := s.proxy
+	s.proxy = nil
+	s.proxyAddr = ""
+	s.proxyMu.Unlock()
+	if proxy != nil {
+		proxy.Stop()
 	}
 	s.setStatus(StatusDisconnected)
 	return nil
@@ -75,5 +83,7 @@ func (s *VNCSession) Write(data []byte) error {
 }
 
 func (s *VNCSession) ProxyAddr() string {
+	s.proxyMu.RLock()
+	defer s.proxyMu.RUnlock()
 	return s.proxyAddr
 }

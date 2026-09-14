@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "typecheck": "vue-tsc --noEmit",
     "build:dev": "vite build --minify false --mode development",
+    "typecheck": "npm run bindings:types && vue-tsc --noEmit -p tsconfig.json",
+    "bindings:types": "node scripts/generate-binding-types.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -13,7 +13,7 @@ import { RecordRecentConnection } from '../../bindings/github.com/ys-ll/uniterm/
 import { useConnectionStore } from '../stores/connectionStore'
 import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
-import { usePanelLifecycle } from '../services/panelLifecycle'
+import { isPanelLifecycleCancelled, usePanelLifecycle } from '../services/panelLifecycle'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 import { parseWslFromShell } from '../utils/shellLabel'
 import { t } from '../i18n'
@@ -253,6 +253,9 @@ async function runSpec(key: string, config: ConnectionConfig, spec: ConnectSpec,
       if (persist) RecordRecentConnection(config.id)
     }
   } catch (e) {
+    // Closing or reconnecting a tab supersedes its initial launch. Its late
+    // cancellation must not tear down a newer session on the same panel.
+    if (isPanelLifecycleCancelled(e)) return
     console.error(`Failed to create ${sessionType} session:`, e)
     if (spec.onError) {
       spec.onError(panel.id, e)

@@ -77,13 +77,10 @@ func NewX11DesktopSession(id string) *X11DesktopSession {
 	}
 }
 
-// Connect is the Session-interface stub. The real entry point is
-// ConnectX11Desktop below, which X11DesktopConnect in app.go invokes.
-// The frontend sets deferConnect: true at create time so the generic
-// launch goroutine never calls this method. It exists only to satisfy
-// the Session interface; any direct call here is a programming error.
+// Connect is intentionally not invoked through the generic session launcher.
+// X11DesktopConnect owns the explicit connection boundary for this session.
 func (s *X11DesktopSession) Connect(config ConnectionConfig) error {
-	return fmt.Errorf("x11-desktop: use X11DesktopConnect (not Session.Connect); set deferConnect: true at create time")
+	return fmt.Errorf("x11-desktop: use X11DesktopConnect (not Session.Connect)")
 }
 
 // ConnectX11Desktop opens an SSH connection with X11 forwarding and runs
@@ -222,7 +219,9 @@ func (s *X11DesktopSession) Disconnect() error {
 // remote X clients and the local X server, bypassing this session.
 // Resize is a no-op because the remote desktop's size is determined by
 // the X server, not by xterm.js dimensions.
-func (s *X11DesktopSession) Write(_ []byte) error { return fmt.Errorf("x11-desktop: not a terminal session") }
+func (s *X11DesktopSession) Write(_ []byte) error {
+	return fmt.Errorf("x11-desktop: not a terminal session")
+}
 func (s *X11DesktopSession) Resize(_, _ int) error { return nil }
 
 func (s *X11DesktopSession) IsConnected() bool { return s.Status() == StatusConnected }
