@@ -9,6 +9,7 @@ import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { waitForTerminalSize } from '../services/terminalManager'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 import type { ConnectionConfig } from '../types/session'
 
@@ -89,12 +90,17 @@ export function useDuplicateSession() {
             initialCols: 0,
             initialRows: 0,
           }
-          info = await CreateSession(sessionType, config)
-          panelStore.bindSession(newPanel.id, info.id)
-          sessionStore.initSession(info.id)
+          info = tab.type === 'sftp'
+            ? await usePanelLifecycle().createSession(newPanel.id, sessionType, config)
+            : await CreateSession(sessionType, config)
+          if (tab.type !== 'sftp') {
+            panelStore.bindSession(newPanel.id, info.id)
+            sessionStore.initSession(info.id)
+          }
         }
       } catch (e) {
         console.error('Failed to duplicate session:', e)
+        await usePanelLifecycle().disposePanel(newPanel.id)
         return
       }
     }

@@ -14,6 +14,7 @@ import { useConnectionStore } from '../stores/connectionStore'
 import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 import { parseWslFromShell } from '../utils/shellLabel'
 import { t } from '../i18n'
@@ -247,10 +248,15 @@ async function runSpec(key: string, config: ConnectionConfig, spec: ConnectSpec,
   }
 
   try {
-    const info = await CreateSession(sessionType, config)
+    const filePanel = panelKind === 'sftp'
+    const info = filePanel
+      ? await usePanelLifecycle().createSession(panel.id, sessionType, config)
+      : await CreateSession(sessionType, config)
     if (spec.sessionFirst && info?.proxyAddr) panelStore.setProxyAddr(panel.id, info.proxyAddr)
-    panelStore.bindSession(panel.id, info.id)
-    if (spec.initSession) sessionStore.initSession(info.id)
+    if (!filePanel) {
+      panelStore.bindSession(panel.id, info.id)
+      if (spec.initSession) sessionStore.initSession(info.id)
+    }
     if (spec.sessionFirst) {
       tab = openTab()
       if (persist) RecordRecentConnection(config.id)
@@ -261,7 +267,7 @@ async function runSpec(key: string, config: ConnectionConfig, spec: ConnectSpec,
       spec.onError(panel.id, e)
     } else {
       if (tab) tabStore.closeTab(tab.id)
-      panelStore.removePanel(panel.id)
+      await usePanelLifecycle().disposePanel(panel.id)
     }
   }
 }

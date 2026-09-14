@@ -46,6 +46,7 @@ const panelState = reactive<{
   transferTasks: Map<string, TransferTaskUI[]>
   proxyAddrs: Map<string, string>
   vncCaches: Map<string, VNCCache>
+  spiceCaches: Map<string, SPICECache>
 }>({
   panels: new Map(),
   transferTasks: new Map(),
@@ -98,6 +99,13 @@ export const usePanelStore = defineStore('panel', () => {
     if (p?.sessionId) {
       UnregisterSession(p.sessionId).catch(() => {})
     }
+    // Panel-scoped UI state must follow the panel. Lifecycle callers may
+    // already have closed these resources; the operations below are idempotent
+    // and also protect legacy removal paths.
+    panelState.transferTasks.delete(id)
+    panelState.proxyAddrs.delete(id)
+    removeVNCCache(id)
+    removeSPICECache(id)
     panelState.panels.delete(id)
   }
 
@@ -118,6 +126,16 @@ export const usePanelStore = defineStore('panel', () => {
     }
     if (sessionId) {
       RegisterSessionForPanel(sessionId, panelId).catch(() => {})
+    }
+  }
+
+  function unbindSession(panelId: string) {
+    const p = panelState.panels.get(panelId)
+    if (!p) return
+    const prev = p.sessionId
+    p.sessionId = null
+    if (prev) {
+      UnregisterSession(prev).catch(() => {})
     }
   }
 
@@ -220,12 +238,14 @@ export const usePanelStore = defineStore('panel', () => {
     transferTasks: panelState.transferTasks,
     proxyAddrs: panelState.proxyAddrs,
     vncCaches: panelState.vncCaches,
+    spiceCaches: panelState.spiceCaches,
     getTransferTasks,
     removeTransferTasks,
     createPanel,
     removePanel,
     getPanel,
     bindSession,
+    unbindSession,
     updateStatus,
     updateTitle,
     setOutputLog,

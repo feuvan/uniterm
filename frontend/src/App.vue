@@ -217,6 +217,7 @@ import type { ShortcutAction } from './types/settings'
 import { useI18n } from './i18n'
 import { CreateSession, CloseSession, RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, SessionStart, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
 import { waitForTerminalSize } from './services/terminalManager'
+import { usePanelLifecycle } from './services/panelLifecycle'
 import { msg } from './services/message'
 import { unregisterTransferRoute } from './services/transferTaskCenter'
 import type { ConnectionConfig } from './types/session'
@@ -276,6 +277,7 @@ const companionStore = useCompanionStore()
 const settingsStore = useSettingsStore()
 const localStateStore = useLocalStateStore()
 const containerStore = useContainerStore()
+const lifecycle = usePanelLifecycle()
 const syncStore = useSyncStore()
 const tunnelStore = useTunnelStore()
 const updateCheck = useUpdateCheck()
@@ -1194,6 +1196,9 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
         }
       }
     }
+  }
+  if (tab && tab.type === 'sftp') {
+    await lifecycle.disposePanel(tab.panelId)
   }
   if (tab && tab.type === 'rdp') {
     const p = panelStore.getPanel(tab.panelId)
