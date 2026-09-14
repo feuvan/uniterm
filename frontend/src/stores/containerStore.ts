@@ -3,6 +3,7 @@ import * as client from '../services/containerClient'
 import { usePanelStore } from './panelStore'
 import { useTabStore } from './tabStore'
 import { useSessionStore } from './sessionStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import type { ContainerTab, ContainerInfo, ContainerImage, InspectResult } from '../types/container'
 
 export interface ContainerSession {
@@ -16,6 +17,8 @@ export interface ContainerSession {
   refreshing: boolean
   error: string
 }
+
+const resourceReleases = new Map<string, () => void>()
 
 export const useContainerStore = defineStore('container', {
   state: () => ({ sessions: {} as Record<string, ContainerSession> }),
@@ -35,6 +38,16 @@ export const useContainerStore = defineStore('container', {
           client.disconnect(tab.connectionId)
           return
         }
+        const lifecycle = usePanelLifecycle()
+        const release = lifecycle.registerResource(tab.panelId, () => {
+          resourceReleases.delete(tab.id)
+          const current = this.sessions[tab.id]
+          if (current === s) {
+            client.disconnect(s.connId)
+            delete this.sessions[tab.id]
+          }
+        })
+        resourceReleases.set(tab.id, release)
         await this.refresh(tab.id)
         if (tab.runtime === 'nerdctl') {
           this.loadNamespaces(tab.id)
@@ -106,7 +119,6 @@ export const useContainerStore = defineStore('container', {
     // Mirrors K8sTabContent.openTerminal: exec params go on the panel config so
     // Panel.vue / TabItem.vue can redial the stream on reconnect / duplicate.
     async openContainerExec(tab: ContainerTab, c: ContainerInfo, shell = 'sh') {
-      const info = await client.execSession(tab.connectionId, c.id, shell)
       const cfg = {
         id: '', name: c.name, type: 'container-exec' as any, host: '', port: 0, user: '', authType: 'password' as any,
         containerExecConnId: tab.connectionId, containerExecContainerId: c.id, containerExecShell: shell,
@@ -114,15 +126,24 @@ export const useContainerStore = defineStore('container', {
       const panelStore = usePanelStore()
       const tabStore = useTabStore()
       const sessionStore = useSessionStore()
+      const lifecycle = usePanelLifecycle()
       const panel = panelStore.createPanel(cfg as any, 'container-exec')
       panelStore.updateTitle(panel.id, c.name)
-      panelStore.bindSession(panel.id, info.id)
-      sessionStore.initSession(info.id)
-      sessionStore.updateStatus(info.id, 'connected')
-      const termTab = tabStore.createTerminalTab(panel.title, panel.id)
-      panelStore.movePanelToTab(panel.id, termTab.id)
+      const generation = lifecycle.begin(panel.id)
+      try {
+        const info = await client.execSession(tab.connectionId, c.id, shell)
+        await lifecycle.adoptSession(panel.id, info.id, generation)
+        sessionStore.updateStatus(info.id, 'connected')
+        const termTab = tabStore.createTerminalTab(panel.title, panel.id)
+        panelStore.movePanelToTab(panel.id, termTab.id)
+      } catch (error) {
+        await lifecycle.disposePanel(panel.id)
+        throw error
+      }
     },
     close(tabId: string) {
+      resourceReleases.get(tabId)?.()
+      resourceReleases.delete(tabId)
       const s = this.sessions[tabId]
       if (!s) return
       client.disconnect(s.connId)

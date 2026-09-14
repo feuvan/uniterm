@@ -4,9 +4,9 @@
 // 「重连」 and the refresh-triggered auto-reconnect share one implementation:
 // close the old session, create a fresh one from the panel's stored config,
 // rebind the panel, and wait for the new session to report connected.
-import { CreateSession, CloseSession, ListSessions } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelStore } from '../stores/panelStore'
-import { useSessionStore } from '../stores/sessionStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
+import { backendSessionApi } from '../services/backendSessionApi'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 
 // One in-flight reconnect per panel: concurrent triggers (refresh spam, a
@@ -41,22 +41,17 @@ export function reconnectFileTransferPanel(panelId: string): Promise<string | nu
 
 async function doReconnect(panelId: string): Promise<string | null> {
   const panelStore = usePanelStore()
-  const sessionStore = useSessionStore()
+  const lifecycle = usePanelLifecycle()
   const panel = panelStore.getPanel(panelId)
   const cfg = panel?.config
   if (!cfg || !cfg.type) return null
 
-  const oldId = panel.sessionId
-  if (oldId) {
-    try { await CloseSession(oldId) } catch (_) {}
-  }
+  await lifecycle.disposeSession(panelId)
   // SSH-based file panels carry the protocol preference on the config; the
   // file-transfer types (ftp/smb/...) already match their session type.
   const proto = fileTransferProto(cfg)
   const sessionType = cfg.type === 'ssh' ? proto : cfg.type
-  const info = await CreateSession(sessionType, cfg)
-  panelStore.bindSession(panelId, info.id)
-  sessionStore.initSession(info.id)
+  const info = await lifecycle.createSession(panelId, sessionType, cfg)
   const ok = await waitUntilConnected(info.id)
   return ok ? info.id : null
 }
@@ -65,9 +60,9 @@ async function waitUntilConnected(sid: string): Promise<boolean> {
   const deadline = Date.now() + CONNECT_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
-      const sessions = await ListSessions()
-      // ListSessions comes from the untyped Wails bindings (same as callers
-      // like FileTabContent's probe), so the shape is annotated locally.
+      const sessions = await backendSessionApi.listSessions()
+      // Session records are normalized by the typed backend adapter so this
+      // reconnect path does not depend on the generated binding's JS shape.
       const status = (sessions as Array<{ id: string; status: string }>)
         .find(s => s.id === sid)?.status
       if (status === 'connected') return true

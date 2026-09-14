@@ -145,16 +145,14 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { formatKeyBinding, panelDigitShortcutsSuppressed, panelDigitShortcutPrefix, formatDigitShortcut } from '../composables/useKeyboardShortcuts'
 import type { ShortcutAction } from '../types/settings'
 import {
-  CreateSession,
-  CloseSession,
   K8sExecSession,
   ContainerExecSession,
   EnableSessionOutputLog,
   DisableSessionOutputLog,
   GetSessionOutputLogInfo,
   OpenPathInExplorer,
-  SessionStart,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { msg } from '../services/message'
 import { useI18n } from '../i18n'
 import type { Panel } from '../types/workspace'
@@ -196,6 +194,7 @@ const emit = defineEmits<{
 const tabStore = useTabStore()
 const panelStore = usePanelStore()
 const sessionStore = useSessionStore()
+const lifecycle = usePanelLifecycle()
 const settingsStore = useSettingsStore()
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent)
@@ -461,18 +460,14 @@ async function retryConnection() {
         initialCols: 0,
         initialRows: 0,
       }
-      const info = await CreateSession('local', config)
-      panelStore.bindSession(props.panel.id, info.id)
-      sessionStore.initSession(info.id)
+      await lifecycle.disposeSession(props.panel.id)
+      const info = await lifecycle.createSession(props.panel.id, 'local', config)
       const size = await waitForTerminalSize(info.id)
       if (size.cols > 0 && size.rows > 0) {
         config.initialCols = size.cols
         config.initialRows = size.rows
       }
-      await SessionStart(info.id, config).catch((e) => {
-        baseTerminalRef.value?.write(`\r\n\x1b[31mFailed to start local shell: ${e}\x1b[0m\r\n`)
-        CloseSession(info.id).catch(() => {})
-      })
+      await lifecycle.startSession(props.panel.id, info.id, config)
       retryAttempt = 0
     } catch (e: any) {
       baseTerminalRef.value?.write(`\r\n\x1b[31mFailed to start local shell: ${e}\x1b[0m\r\n`)
@@ -492,6 +487,8 @@ async function retryConnection() {
     const at = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
     baseTerminalRef.value?.write(RESET_MOUSE_MODES + `\r\n\x1b[33mReconnecting... (${at})\x1b[0m\r\n`)
     try {
+      await lifecycle.disposeSession(props.panel.id)
+      const generation = lifecycle.begin(props.panel.id)
       let info
       if (props.panel.type === 'k8s-exec') {
         if (!c.k8sExecConnId || !c.k8sExecPod || !c.k8sExecContainer) throw new Error('exec session parameters missing')
@@ -500,8 +497,7 @@ async function retryConnection() {
         if (!c.containerExecConnId || !c.containerExecContainerId) throw new Error('exec session parameters missing')
         info = await ContainerExecSession(c.containerExecConnId, c.containerExecContainerId, c.containerExecShell || 'sh')
       }
-      panelStore.bindSession(props.panel.id, info.id)
-      sessionStore.initSession(info.id)
+      await lifecycle.adoptSession(props.panel.id, info.id, generation)
       sessionStore.updateStatus(info.id, 'connected')
     } catch (e: any) {
       baseTerminalRef.value?.write(`\r\n\x1b[31mReconnect failed: ${e?.message || e}\x1b[0m\r\n`)
@@ -539,18 +535,14 @@ async function retryConnection() {
       initialCols: 0,
       initialRows: 0,
     }
-    const info = await CreateSession(props.panel.config.type, config)
-    panelStore.bindSession(props.panel.id, info.id)
-    sessionStore.initSession(info.id)
+    await lifecycle.disposeSession(props.panel.id)
+    const info = await lifecycle.createSession(props.panel.id, props.panel.config.type, config)
     const size = await waitForTerminalSize(info.id)
     if (size.cols > 0 && size.rows > 0) {
       config.initialCols = size.cols
       config.initialRows = size.rows
     }
-    await SessionStart(info.id, config).catch((e) => {
-      baseTerminalRef.value?.write(`\r\n\x1b[31mReconnect failed: ${e}\x1b[0m\r\n`)
-      CloseSession(info.id).catch(() => {})
-    })
+    await lifecycle.startSession(props.panel.id, info.id, config)
   } catch (e: any) {
     baseTerminalRef.value?.write(`\r\n\x1b[31mReconnect failed: ${e}\x1b[0m\r\n`)
     baseTerminalRef.value?.setRetryOnEnter(true)
@@ -564,10 +556,6 @@ async function retryConnection() {
 async function forceReconnect() {
   if (!props.panel.config) return
   baseTerminalRef.value?.setRetryOnEnter(false)
-  const oldId = props.panel.sessionId
-  if (oldId) {
-    try { await CloseSession(oldId) } catch (_) {}
-  }
   retryAttempt = 0
   await retryConnection()
 }

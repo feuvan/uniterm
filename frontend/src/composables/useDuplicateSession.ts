@@ -1,14 +1,12 @@
 import {
-  CreateSession,
-  CloseSession,
   K8sExecSession,
   ContainerExecSession,
-  SessionStart,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { waitForTerminalSize } from '../services/terminalManager'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 import type { ConnectionConfig } from '../types/session'
 
@@ -76,12 +74,12 @@ export function useDuplicateSession() {
       try {
         if (panel.type === 'k8s-exec' || panel.type === 'container-exec') {
           // Exec panels can't be rebuilt via CreateSession (no such type); re-dial the exec stream.
+          const generation = usePanelLifecycle().begin(newPanel.id)
           const c = panel.config
           info = panel.type === 'k8s-exec'
             ? await K8sExecSession(c.k8sExecConnId, c.k8sNamespace || '', c.k8sExecPod, c.k8sExecContainer)
             : await ContainerExecSession(c.containerExecConnId, c.containerExecContainerId, c.containerExecShell || 'sh')
-          panelStore.bindSession(newPanel.id, info.id)
-          sessionStore.initSession(info.id)
+          await usePanelLifecycle().adoptSession(newPanel.id, info.id, generation)
           sessionStore.updateStatus(info.id, 'connected')
         } else {
           const sessionType = resolveSessionType(tab.type, panel.config)
@@ -90,12 +88,11 @@ export function useDuplicateSession() {
             initialCols: 0,
             initialRows: 0,
           }
-          info = await CreateSession(sessionType, config)
-          panelStore.bindSession(newPanel.id, info.id)
-          sessionStore.initSession(info.id)
+          info = await usePanelLifecycle().createSession(newPanel.id, sessionType, config)
         }
       } catch (e) {
         console.error('Failed to duplicate session:', e)
+        await usePanelLifecycle().disposePanel(newPanel.id)
         return
       }
     }
@@ -137,9 +134,8 @@ export function useDuplicateSession() {
           config.initialCols = size.cols
           config.initialRows = size.rows
         }
-        await SessionStart(info.id, config).catch((e) => {
+        await usePanelLifecycle().startSession(newPanel.id, info.id, config).catch((e) => {
           console.error('Failed to start duplicated session:', e)
-          CloseSession(info.id).catch(() => {})
         })
       } catch (e) {
         console.error('Failed to duplicate session:', e)

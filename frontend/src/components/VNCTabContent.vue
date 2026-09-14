@@ -70,13 +70,11 @@ import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { Loader } from '@lucide/vue'
 import { useI18n } from '../i18n'
 import { usePanelStore } from '../stores/panelStore'
-import { useSessionStore } from '../stores/sessionStore'
 import type { ConnectionConfig } from '../types/session'
 import { Clipboard, Events } from '@wailsio/runtime'
-import { CreateSession, CloseSession } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 const { t } = useI18n()
 const panelStore = usePanelStore()
-const sessionStore = useSessionStore()
 
 const props = defineProps<{
   panelId: string
@@ -119,6 +117,11 @@ function watchThemeBackground() {
 let rfb: any = null
 let unsubStatus: (() => void) | null = null
 let isIniting = false
+const lifecycle = usePanelLifecycle()
+lifecycle.registerResource(props.panelId, () => {
+  try { rfb?.disconnect() } catch (_) {}
+  rfb = null
+})
 
 async function connect() {
   if (!props.config) return
@@ -126,16 +129,8 @@ async function connect() {
   status.value = 'connecting'
   lastError.value = ''
   try {
-    const info = await CreateSession('vnc', props.config)
+    const info = await lifecycle.createSession(props.panelId, 'vnc', props.config)
     currentSessionId.value = info.id
-    // Bind the session to the panel so tab-close cleanup and later
-    // session:status events resolve to this id. The proxy address comes
-    // straight from the CreateSession result: the synchronous VNC connect
-    // makes it available here, independent of the racy session:status
-    // 'connected' event that used to be dropped before the session id was
-    // set, leaving VNC stuck on "connecting".
-    panelStore.bindSession(props.panelId, info.id)
-    sessionStore.initSession(info.id)
     if (info.proxyAddr) {
       panelStore.setProxyAddr(props.panelId, info.proxyAddr)
       savedPassword.value = props.config.password || ''
@@ -149,10 +144,8 @@ async function connect() {
 }
 
 async function reconnect() {
-  if (currentSessionId.value) {
-    try { await CloseSession(currentSessionId.value) } catch (_) {}
-    currentSessionId.value = null
-  }
+  await lifecycle.disposeSession(props.panelId)
+  currentSessionId.value = null
   if (rfb) {
     rfb.disconnect()
     rfb = null
@@ -331,6 +324,8 @@ onMounted(() => {
   if (storedProxy && props.config) {
     savedPassword.value = props.config.password || ''
     initRFB(storedProxy, savedPassword.value)
+  } else if (currentSessionId.value) {
+    status.value = 'connecting'
   } else {
     connect()
   }

@@ -51,6 +51,7 @@ import * as k8sClient from '../services/k8sClient'
 import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { useK8sStore } from '../stores/k8sStore'
 import { useTunnelCredentials } from '../composables/useTunnelCredentials'
 import K8sTree from './K8sTree.vue'
@@ -68,10 +69,21 @@ const { resolveTunnelCredentials } = useTunnelCredentials()
 const panelStore = usePanelStore()
 const tabStore = useTabStore()
 const sessionStore = useSessionStore()
+const lifecycle = usePanelLifecycle()
 const k8sStore = useK8sStore()
 
 const connId = ref<string>('')
+let unregisterConnection: (() => void) | null = null
 const error = ref('')
+
+function releaseConnection() {
+  unregisterConnection?.()
+  unregisterConnection = null
+  const id = connId.value
+  connId.value = ''
+  if (id) k8sClient.disconnect(id)
+}
+
 const initialNamespace = ref<string>(props.tab.namespace || '')
 
 // Namespaces fetched live from the cluster once connected. If the list call
@@ -179,6 +191,7 @@ function crSelfPathOverride(): ((obj: any) => string) | undefined {
 async function openTerminal(pod: any) {
   const containers = (pod.spec?.containers || []).map((c: any) => c.name)
   let container = containers[0]
+  let execPanelId: string | null = null
   try {
     if (containers.length > 1) {
       const { value } = await ElMessageBox.prompt(
@@ -188,7 +201,6 @@ async function openTerminal(pod: any) {
       container = value
     }
     const ns = pod.metadata?.namespace
-    const info = await k8sClient.execSession(connId.value, ns, pod.metadata?.name, container)
     const title = `${pod.metadata?.name}/${container}`
     // Store exec params on the config so Panel.vue can rebuild the stream on reconnect.
     const cfg = {
@@ -196,15 +208,18 @@ async function openTerminal(pod: any) {
       k8sExecConnId: connId.value, k8sNamespace: ns, k8sExecPod: pod.metadata?.name, k8sExecContainer: container,
     }
     const panel = panelStore.createPanel(cfg as any, 'k8s-exec')
+    execPanelId = panel.id
     panelStore.updateTitle(panel.id, title)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    const generation = lifecycle.begin(panel.id)
+    const info = await k8sClient.execSession(connId.value, ns, pod.metadata?.name, container)
+    await lifecycle.adoptSession(panel.id, info.id, generation)
     // Exec socket is already connected when the binding returns; the backend only
     // emits session:status on later transitions (disconnect), so mark it now.
     sessionStore.updateStatus(info.id, 'connected')
     const tab = tabStore.createTerminalTab(panel.title, panel.id)
     panelStore.movePanelToTab(panel.id, tab.id)
   } catch (e: any) {
+    if (execPanelId) await lifecycle.disposePanel(execPanelId)
     if (e !== 'cancel' && e !== 'close') ElMessage.error(String(e?.message || e))
   }
 }
@@ -256,6 +271,7 @@ async function connect() {
       tunnelUser,
       tunnelPassword
     )
+    unregisterConnection = lifecycle.registerResource(props.tab.panelId, releaseConnection)
     k8sStore.setConnStatus(props.connection.id, 'connected')
     loadNamespaces()
   } catch (e: any) {
@@ -273,10 +289,7 @@ function onReconnectEvent(e: Event) {
 // normal connect() (which already resets error state and re-resolves tunnel
 // credentials on each call).
 async function reconnect() {
-  if (connId.value) {
-    try { k8sClient.disconnect(connId.value) } catch (_) {}
-    connId.value = ''
-  }
+  releaseConnection()
   await connect()
 }
 
@@ -291,10 +304,7 @@ onBeforeUnmount(() => {
     document.removeEventListener('mousemove', onResizeMove)
     document.removeEventListener('mouseup', onResizeEnd)
   }
-  if (connId.value) {
-    // K8sResourceList 内部 onBeforeUnmount 已经 unsubscribe 当前订阅。
-    k8sClient.disconnect(connId.value)
-  }
+  releaseConnection()
 })
 </script>
 

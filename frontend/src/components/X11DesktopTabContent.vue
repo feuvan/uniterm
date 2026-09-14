@@ -47,15 +47,13 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { Loader } from '@lucide/vue'
 import { useI18n } from '../i18n'
-import { usePanelStore } from '../stores/panelStore'
-import { useSessionStore } from '../stores/sessionStore'
 import type { ConnectionConfig } from '../types/session'
 import { Events } from '@wailsio/runtime'
-import { CreateSession, CloseSession, GetPlatform, X11DesktopConnect } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { GetPlatform, X11DesktopConnect } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { backendErrorText, backendErrorTextOf } from '../utils/backendError'
 const { t } = useI18n()
-const panelStore = usePanelStore()
-const sessionStore = useSessionStore()
+const lifecycle = usePanelLifecycle()
 const props = defineProps<{
   panelId: string
   config: ConnectionConfig | null
@@ -104,14 +102,14 @@ async function start() {
     console.warn('X11 desktop: GetPlatform failed', e)
   }
   try {
-    const info = await CreateSession('x11-desktop', { ...props.config })
+    const info = await lifecycle.createSession(props.panelId, 'x11-desktop', { ...props.config })
     currentSessionId.value = info.id
-    panelStore.bindSession(props.panelId, info.id)
-    sessionStore.initSession(info.id)
     await X11DesktopConnect(props.config.id, info.id)
     status.value = 'connected'
   } catch (e: any) {
     console.error('X11 desktop connect error:', e)
+    await lifecycle.disposeSession(props.panelId)
+    currentSessionId.value = null
     lastError.value = backendErrorText(e)
     status.value = 'error'
   }
@@ -119,18 +117,14 @@ async function start() {
 
 async function disconnect() {
   if (currentSessionId.value) {
-    try { await CloseSession(currentSessionId.value) } catch (_) {}
-    panelStore.bindSession(props.panelId, '')
+    await lifecycle.disposeSession(props.panelId)
     currentSessionId.value = null
   }
 }
 
 async function reconnect() {
-  if (currentSessionId.value) {
-    try { await CloseSession(currentSessionId.value) } catch (_) {}
-    panelStore.bindSession(props.panelId, '')
-    currentSessionId.value = null
-  }
+  await lifecycle.disposeSession(props.panelId)
+  currentSessionId.value = null
   await start()
 }
 
@@ -170,11 +164,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unsubStatus?.()
   window.removeEventListener('panel:reconnect', onReconnectEvent)
-  if (currentSessionId.value) {
-    try { CloseSession(currentSessionId.value) } catch (_) {}
-    panelStore.bindSession(props.panelId, '')
-    currentSessionId.value = null
-  }
 })
 </script>
 
