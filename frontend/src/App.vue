@@ -1025,26 +1025,22 @@ const actionHandlers: Record<ShortcutAction, () => void> = {
       nextTick(() => aiSidebarRef.value?.focusInput())
     }
   },
-  closePanel: () => {
+  closePanel: async () => {
     const t = tabStore.activeTab
     if (!t) return
     if (t.locked) return
     if (t.type === 'workspace' && t.panelIds.length > 1) {
       const panelId = t.activePanelId || t.panelIds[t.panelIds.length - 1]
-      const p = panelStore.getPanel(panelId)
-      if (p?.sessionId) CloseSession(p.sessionId).catch(() => {})
-      companionStore.disposeForPanel(panelId).catch(() => {})
+      await lifecycle.disposePanel(panelId)
+      await companionStore.disposeForPanel(panelId).catch(() => {})
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
-      panelStore.removePanel(panelId)
     } else if (t.type === 'workspace' && t.panelIds.length === 1) {
       const panelId = t.panelIds[0]
-      const p = panelStore.getPanel(panelId)
-      if (p?.sessionId) CloseSession(p.sessionId).catch(() => {})
-      companionStore.disposeForPanel(panelId).catch(() => {})
+      await lifecycle.disposePanel(panelId)
+      await companionStore.disposeForPanel(panelId).catch(() => {})
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
-      panelStore.removePanel(panelId)
     } else {
-      closeTab(t.id)
+      await closeTab(t.id)
     }
   },
   terminalSearch: () => {
@@ -1200,86 +1196,26 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
       }
     }
   }
-  if (tab && tab.type === 'sftp') {
-    await lifecycle.disposePanel(tab.panelId)
-  }
-  if (tab && tab.type === 'rdp') {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
-  }
-  // Close VNC session
+  // Protocol-specific UI caches are stopped before the shared resource
+  // disposer removes the panel. Session ownership itself is handled once
+  // below for every panel type.
   if (tab && tab.type === 'vnc') {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
     panelStore.disconnectVNCCache(tab.panelId)
-    panelStore.removeVNCCache(tab.panelId)
   }
-  // Close SPICE session
   if (tab && tab.type === 'spice') {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
     panelStore.disconnectSPICECache(tab.panelId)
-    panelStore.removeSPICECache(tab.panelId)
   }
-  // Close database session
-  if (tab && tab.type === 'database') {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
-  }
-  // Close redis session
-  if (tab && (tab.type === 'redis' || tab.type === 'mongodb' || tab.type === 'elasticsearch')) {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
-  }
-  // Close monitor session
-  if (tab && tab.type === 'monitor') {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
-  }
-  // Close container session (KeepAlive may keep the component mounted, so the
-  // poll timer + backend connection in containerStore must be closed explicitly)
+  // KeepAlive may leave the container component mounted, so stop its poller
+  // before the generic panel resource disposal.
   if (tab && tab.type === 'container') {
     containerStore.close(tab.id)
   }
-  // Terminal sessions must be explicitly closed to terminate the connection/shell process
-  if (tab && tab.type === 'terminal') {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
-  }
-  // Workspace: close each panel session
-  if (tab && tab.type === 'workspace') {
-    for (const pid of tab.panelIds) {
-      const p = panelStore.getPanel(pid)
-      if (p?.sessionId) {
-        try { await CloseSession(p.sessionId) } catch (_) {}
-      }
-    }
-  }
-  // X11 desktop session cleanup
-  if (tab && tab.type === 'x11-desktop') {
-    const p = panelStore.getPanel(tab.panelId)
-    if (p?.sessionId) {
-      try { await CloseSession(p.sessionId) } catch (_) {}
-    }
-  }
   const panelIds = tabStore.closeTab(tabId)
-  // Dispose SSH companion sidebars (sftp/monitor) bound to these panels
+  // Dispose SSH companion sidebars (sftp/monitor) before removing their owner
+  // panels. Their child resources will be moved into the shared lifecycle in a
+  // later phase.
   companionStore.disposeForPanels(panelIds).catch(() => {})
-  panelIds.forEach(pid => panelStore.removePanel(pid))
+  await lifecycle.disposePanels(panelIds)
   nextTick(() => {
     if (tabStore.tabs.length === 0) {
       tabStore.createStartTab()
@@ -1428,28 +1364,9 @@ async function onConnect(config: ConnectionConfig, keepOpen?: boolean, wasEdit?:
   if (!resolved) return
   config = resolved
 
-  // Create session BEFORE panel so the terminal has a sessionId when it first
-  // fires SessionResize. Otherwise the resize is silently dropped because the
-  // terminal calls getSessionId() too early and never retries.
-  //
-  // Defer the actual Connect until BaseTerminal has mounted, fitAddon has
-  // measured the real xterm cols/rows, and we can write that into
-  // config.initialCols/Rows — otherwise the SSH/local PTY starts at the
-  // default 80x24 and Claude Code draws its first batch of tables at that
-  // width, drifting relative to later output that wraps at the real cols.
-  let sessionId = ''
-  try {
-    const info = await CreateSession(config.type, {
-      ...config,
-      initialCols: 0,
-      initialRows: 0,
-    })
-    sessionId = info.id
-  } catch (e) {
-    console.error('Failed to create session:', e)
-    return
-  }
-
+  // Create the panel before the backend session so lifecycle ownership starts
+  // before the first async IPC call. The panel is still not mounted until its
+  // session has been bound, preserving the terminal resize ordering.
   const panel = panelStore.createPanel(config, config.type)
   const displayTitle = config.name || (config.type === 'local' || config.type === 'wsl'
     ? getShellLabel(config.shellPath)
@@ -1459,8 +1376,21 @@ async function onConnect(config: ConnectionConfig, keepOpen?: boolean, wasEdit?:
     ? `${config.host}:${config.port}`
     : `${config.user}@${config.host}`)
   panelStore.updateTitle(panel.id, displayTitle)
-  panelStore.bindSession(panel.id, sessionId)
-  sessionStore.initSession(sessionId)
+
+  let sessionId = ''
+  try {
+    const info = await lifecycle.createSession(panel.id, config.type, {
+      ...config,
+      initialCols: 0,
+      initialRows: 0,
+    })
+    sessionId = info.id
+  } catch (e) {
+    console.error('Failed to create session:', e)
+    await lifecycle.disposePanel(panel.id)
+    return
+  }
+
   const addedToWorkspace = targetWorkspaceId
     ? tabStore.addNewPanelToWorkspace(targetWorkspaceId, panel.id)
     : false
@@ -1473,22 +1403,16 @@ async function onConnect(config: ConnectionConfig, keepOpen?: boolean, wasEdit?:
   if (persist) RecordRecentConnection(config.id)
 
   // Wait for BaseTerminal to mount + fitAddon.fit() to compute the real
-  // xterm cols/rows (which itself waits for document.fonts.ready + 2 rAFs
-  // to ensure the actually-loaded font is being measured). Then start the
-  // session with those dimensions so the remote PTY matches from byte 0.
+  // xterm cols/rows, then start the session with those dimensions.
   const size = await waitForTerminalSize(sessionId)
   if (size.cols > 0 && size.rows > 0) {
     config.initialCols = size.cols
     config.initialRows = size.rows
   }
   try {
-    await SessionStart(sessionId, config)
+    await lifecycle.startSession(panel.id, sessionId, config)
   } catch (e) {
     console.error('Failed to start session:', e)
-    // Session is registered in the backend but never connected — close it
-    // so it doesn't leak until app shutdown. UI rollback is the caller's
-    // responsibility (this helper is reused across connect / duplicate).
-    CloseSession(sessionId).catch(() => {})
   }
 }
 
@@ -1584,9 +1508,7 @@ async function createLocalTerminal(shellPath?: string, keepOpen?: boolean) {
     panel.config = config
     connectionStore.add(config)
     // Local terminal sessions are temporary — don't record in history
-    const info = await CreateSession('local', config)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    const info = await lifecycle.createSession(panel.id, 'local', config)
     // Create tab AFTER session is bound so BaseTerminal mounts with valid sessionId
     const prev = tabStore.activeTab
     const tab = prev?.type === 'start' && !keepOpen
@@ -1602,14 +1524,13 @@ async function createLocalTerminal(shellPath?: string, keepOpen?: boolean) {
       config.initialRows = size.rows
     }
     try {
-      await SessionStart(info.id, config)
+      await lifecycle.startSession(panel.id, info.id, config)
     } catch (e) {
       console.error('Failed to start local session:', e)
-      CloseSession(info.id).catch(() => {})
     }
   } catch (e) {
     console.error('Failed to create local terminal:', e)
-    panelStore.removePanel(panel.id)
+    await lifecycle.disposePanel(panel.id)
   }
 }
 
@@ -1638,9 +1559,7 @@ async function createWslTerminal(distro: string, keepOpen?: boolean) {
     panel.config = config
     connectionStore.add(config)
     // WSL terminal sessions are temporary — don't record in history
-    const info = await CreateSession('wsl', config)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    const info = await lifecycle.createSession(panel.id, 'wsl', config)
     const prev = tabStore.activeTab
     const tab = prev?.type === 'start' && !keepOpen
       ? tabStore.replaceStartTab(prev.id, panel.title, panel.id)
@@ -1653,14 +1572,13 @@ async function createWslTerminal(distro: string, keepOpen?: boolean) {
       config.initialRows = size.rows
     }
     try {
-      await SessionStart(info.id, config)
+      await lifecycle.startSession(panel.id, info.id, config)
     } catch (e) {
       console.error('Failed to start wsl session:', e)
-      CloseSession(info.id).catch(() => {})
     }
   } catch (e) {
     console.error('Failed to create wsl terminal:', e)
-    panelStore.removePanel(panel.id)
+    await lifecycle.disposePanel(panel.id)
   }
 }
 
@@ -1965,13 +1883,11 @@ async function onConnectMonitor(config: ConnectionConfig, prevStart?: any) {
   RecordRecentConnection(config.id)
 
   try {
-    const info = await CreateSession('monitor', config)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    await lifecycle.createSession(panel.id, 'monitor', config)
   } catch (e) {
     console.error('Failed to create monitor session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -2013,9 +1929,7 @@ async function onConnectDB(config: ConnectionConfig, prevStart?: any, persist = 
     } else {
       sessionType = 'database'
     }
-    const info = await CreateSession(sessionType, config)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    await lifecycle.createSession(panel.id, sessionType, config)
   } catch (e: any) {
     const errMsg = e?.message || String(e)
     console.error('Failed to create database session:', errMsg)
@@ -2029,10 +1943,6 @@ async function onConnectDB(config: ConnectionConfig, prevStart?: any, persist = 
 // so — unlike terminal/desktop panels — no content component owns the lifecycle:
 // close the old session, then create a fresh one and rebind the same panel.
 async function reconnectDatabasePanel(panel: { id: string; sessionId: string | null; config: ConnectionConfig | null }) {
-  const oldId = panel.sessionId
-  if (oldId) {
-    try { await CloseSession(oldId) } catch (_) {}
-  }
   const cfg = panel.config
   if (!cfg) return
   let sessionType = 'database'
@@ -2040,9 +1950,8 @@ async function reconnectDatabasePanel(panel: { id: string; sessionId: string | n
   else if (cfg.dbType === 'mongodb') sessionType = 'mongodb'
   else if (cfg.dbType === 'elasticsearch') sessionType = 'elasticsearch'
   try {
-    const info = await CreateSession(sessionType, cfg)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    await lifecycle.disposeSession(panel.id)
+    await lifecycle.createSession(panel.id, sessionType, cfg)
   } catch (e: any) {
     panelStore.updateStatus(panel.id, 'error')
     msg.error(`${t('db.connectFailed')}: ${e?.message || String(e)}`)
@@ -2052,16 +1961,11 @@ async function reconnectDatabasePanel(panel: { id: string; sessionId: string | n
 // Force-reconnect a monitor panel. The session is created in App.vue
 // (onConnectMonitor), so it's re-initiated here like the database panels.
 async function reconnectMonitorPanel(panel: { id: string; sessionId: string | null; config: ConnectionConfig | null }) {
-  const oldId = panel.sessionId
-  if (oldId) {
-    try { await CloseSession(oldId) } catch (_) {}
-  }
   const cfg = panel.config
   if (!cfg) return
   try {
-    const info = await CreateSession('monitor', cfg)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    await lifecycle.disposeSession(panel.id)
+    await lifecycle.createSession(panel.id, 'monitor', cfg)
   } catch (e: any) {
     panelStore.updateStatus(panel.id, 'error')
     msg.error(`${t('tab.reconnectFailed')}: ${e?.message || String(e)}`)

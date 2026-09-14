@@ -145,17 +145,14 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { formatKeyBinding, panelDigitShortcutsSuppressed, panelDigitShortcutPrefix, formatDigitShortcut } from '../composables/useKeyboardShortcuts'
 import type { ShortcutAction } from '../types/settings'
 import {
-  CreateSession,
-  CloseSession,
   K8sExecSession,
   ContainerExecSession,
   EnableSessionOutputLog,
   DisableSessionOutputLog,
   GetSessionOutputLogInfo,
   OpenPathInExplorer,
-  SessionStart,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
-import { msg } from '../services/message'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { useI18n } from '../i18n'
 import type { Panel } from '../types/workspace'
 import { waitForTerminalSize } from '../services/terminalManager'
@@ -196,6 +193,7 @@ const emit = defineEmits<{
 const tabStore = useTabStore()
 const panelStore = usePanelStore()
 const sessionStore = useSessionStore()
+const lifecycle = usePanelLifecycle()
 const settingsStore = useSettingsStore()
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent)
@@ -461,18 +459,14 @@ async function retryConnection() {
         initialCols: 0,
         initialRows: 0,
       }
-      const info = await CreateSession('local', config)
-      panelStore.bindSession(props.panel.id, info.id)
-      sessionStore.initSession(info.id)
+      await lifecycle.disposeSession(props.panel.id)
+      const info = await lifecycle.createSession(props.panel.id, 'local', config)
       const size = await waitForTerminalSize(info.id)
       if (size.cols > 0 && size.rows > 0) {
         config.initialCols = size.cols
         config.initialRows = size.rows
       }
-      await SessionStart(info.id, config).catch((e) => {
-        baseTerminalRef.value?.write(`\r\n\x1b[31mFailed to start local shell: ${e}\x1b[0m\r\n`)
-        CloseSession(info.id).catch(() => {})
-      })
+      await lifecycle.startSession(props.panel.id, info.id, config)
       retryAttempt = 0
     } catch (e: any) {
       baseTerminalRef.value?.write(`\r\n\x1b[31mFailed to start local shell: ${e}\x1b[0m\r\n`)
@@ -539,18 +533,14 @@ async function retryConnection() {
       initialCols: 0,
       initialRows: 0,
     }
-    const info = await CreateSession(props.panel.config.type, config)
-    panelStore.bindSession(props.panel.id, info.id)
-    sessionStore.initSession(info.id)
+    await lifecycle.disposeSession(props.panel.id)
+    const info = await lifecycle.createSession(props.panel.id, props.panel.config.type, config)
     const size = await waitForTerminalSize(info.id)
     if (size.cols > 0 && size.rows > 0) {
       config.initialCols = size.cols
       config.initialRows = size.rows
     }
-    await SessionStart(info.id, config).catch((e) => {
-      baseTerminalRef.value?.write(`\r\n\x1b[31mReconnect failed: ${e}\x1b[0m\r\n`)
-      CloseSession(info.id).catch(() => {})
-    })
+    await lifecycle.startSession(props.panel.id, info.id, config)
   } catch (e: any) {
     baseTerminalRef.value?.write(`\r\n\x1b[31mReconnect failed: ${e}\x1b[0m\r\n`)
     baseTerminalRef.value?.setRetryOnEnter(true)
@@ -564,10 +554,6 @@ async function retryConnection() {
 async function forceReconnect() {
   if (!props.panel.config) return
   baseTerminalRef.value?.setRetryOnEnter(false)
-  const oldId = props.panel.sessionId
-  if (oldId) {
-    try { await CloseSession(oldId) } catch (_) {}
-  }
   retryAttempt = 0
   await retryConnection()
 }
