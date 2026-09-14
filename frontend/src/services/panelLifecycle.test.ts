@@ -77,6 +77,18 @@ describe('PanelLifecycle', () => {
     expect(fixture.sessions.get('panel-1')).toBeNull()
   })
 
+  it('disposes panel-owned resources after the session', async () => {
+    const fixture = createFixture()
+    const order: string[] = []
+    fixture.lifecycle.registerResource('panel-1', () => { order.push('resource') })
+
+    await fixture.lifecycle.createSession('panel-1', 'sftp', config)
+    order.push('session-created')
+    await fixture.lifecycle.disposePanel('panel-1')
+
+    expect(order).toEqual(['session-created', 'resource'])
+  })
+
   it('closes a session that resolves after the panel was disposed', async () => {
     const fixture = createFixture()
     let resolveCreate!: (info: SessionInfo) => void

@@ -205,7 +205,6 @@ import { useSkillStore } from './stores/skillStore'
 import { useCommandStore } from './stores/commandStore'
 import { useTunnelStore } from './stores/tunnelStore'
 import { useLocalStateStore } from './stores/localStateStore'
-import { useContainerStore } from './stores/containerStore'
 import { useSyncStore } from './stores/syncStore'
 import { useCredentialStore } from './stores/credentialStore'
 import { disposeSessionStore } from './stores/sessionStore'
@@ -215,7 +214,7 @@ import { focusPanelTerminal, installTerminalFocusRestore } from './composables/u
 import { useDuplicateSession } from './composables/useDuplicateSession'
 import type { ShortcutAction } from './types/settings'
 import { useI18n } from './i18n'
-import { CreateSession, CloseSession, RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, SessionStart, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
+import { RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
 import { waitForTerminalSize } from './services/terminalManager'
 import { usePanelLifecycle } from './services/panelLifecycle'
 import { msg } from './services/message'
@@ -276,7 +275,6 @@ const aiStore = useAIStore()
 const companionStore = useCompanionStore()
 const settingsStore = useSettingsStore()
 const localStateStore = useLocalStateStore()
-const containerStore = useContainerStore()
 const lifecycle = usePanelLifecycle()
 const syncStore = useSyncStore()
 const tunnelStore = useTunnelStore()
@@ -1193,20 +1191,9 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
       }
     }
   }
-  // Protocol-specific UI caches are stopped before the shared resource
-  // disposer removes the panel. Session ownership itself is handled once
-  // below for every panel type.
-  if (tab && tab.type === 'vnc') {
-    panelStore.disconnectVNCCache(tab.panelId)
-  }
-  if (tab && tab.type === 'spice') {
-    panelStore.disconnectSPICECache(tab.panelId)
-  }
-  // KeepAlive may leave the container component mounted, so stop its poller
-  // before the generic panel resource disposal.
-  if (tab && tab.type === 'container') {
-    containerStore.close(tab.id)
-  }
+  // Tab-specific resources (native windows, protocol clients, manager
+  // connections and caches) are registered with PanelLifecycle. Closing the
+  // tab only resolves its panel ids; lifecycle owns the disposal order.
   const panelIds = tabStore.closeTab(tabId)
   // Dispose SSH companion sidebars (sftp/monitor) before removing their owner
   // panels. Their child resources will be moved into the shared lifecycle in a

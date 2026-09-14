@@ -9,11 +9,10 @@
 // The generic terminal path (ssh/telnet/mosh/local/wsl/tcp/serial) is genuinely
 // different — it must wait for the real xterm size before SessionStart — so it
 // stays in App.vue and is handed in per call via `connectTerminal`.
-import { CreateSession, RecordRecentConnection } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { RecordRecentConnection } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { useConnectionStore } from '../stores/connectionStore'
 import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
-import { useSessionStore } from '../stores/sessionStore'
 import { usePanelLifecycle } from '../services/panelLifecycle'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 import { parseWslFromShell } from '../utils/shellLabel'
@@ -208,7 +207,6 @@ const SPECS: Record<string, ConnectSpec> = {
 async function runSpec(key: string, config: ConnectionConfig, spec: ConnectSpec, opts: LaunchOptions) {
   const panelStore = usePanelStore()
   const tabStore = useTabStore()
-  const sessionStore = useSessionStore()
   const persist = opts.persist ?? true
   spec.prepare?.(config)
 
@@ -248,15 +246,8 @@ async function runSpec(key: string, config: ConnectionConfig, spec: ConnectSpec,
   }
 
   try {
-    const managedPanel = panelKind === 'sftp' || panelKind === 'database' || key === 'monitor'
-    const info = managedPanel
-      ? await usePanelLifecycle().createSession(panel.id, sessionType, config)
-      : await CreateSession(sessionType, config)
+    const info = await usePanelLifecycle().createSession(panel.id, sessionType, config)
     if (spec.sessionFirst && info?.proxyAddr) panelStore.setProxyAddr(panel.id, info.proxyAddr)
-    if (!managedPanel) {
-      panelStore.bindSession(panel.id, info.id)
-      if (spec.initSession) sessionStore.initSession(info.id)
-    }
     if (spec.sessionFirst) {
       tab = openTab()
       if (persist) RecordRecentConnection(config.id)

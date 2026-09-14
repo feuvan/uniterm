@@ -50,13 +50,11 @@ import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { Loader } from '@lucide/vue'
 import { useI18n } from '../i18n'
 import { usePanelStore } from '../stores/panelStore'
-import { useSessionStore } from '../stores/sessionStore'
 import type { ConnectionConfig } from '../types/session'
 import { Events } from '@wailsio/runtime'
-import { CreateSession, CloseSession } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 const { t } = useI18n()
 const panelStore = usePanelStore()
-const sessionStore = useSessionStore()
 
 const props = defineProps<{
   panelId: string
@@ -72,20 +70,19 @@ const scaleViewport = ref(false)
 let sc: any = null
 let unsubStatus: (() => void) | null = null
 let isIniting = false
+const lifecycle = usePanelLifecycle()
+lifecycle.registerResource(props.panelId, () => {
+  try { sc?.stop() } catch (_) {}
+  sc = null
+})
 
 async function connect() {
   if (!props.config) return
   if (status.value === 'connecting' || status.value === 'connected') return
   status.value = 'connecting'
   try {
-    const info = await CreateSession('spice', props.config)
+    const info = await lifecycle.createSession(props.panelId, 'spice', props.config)
     currentSessionId.value = info.id
-    // Bind the session to the panel so tab-close cleanup resolves to this
-    // id, and drive the SPICE client from the proxy address returned by
-    // CreateSession (the synchronous SPICE connect makes it available
-    // here) rather than the racy session:status 'connected' event.
-    panelStore.bindSession(props.panelId, info.id)
-    sessionStore.initSession(info.id)
     if (info.proxyAddr) {
       panelStore.setProxyAddr(props.panelId, info.proxyAddr)
       initSpice(info.proxyAddr, props.config.password || '')
@@ -97,10 +94,8 @@ async function connect() {
 }
 
 async function reconnect() {
-  if (currentSessionId.value) {
-    try { await CloseSession(currentSessionId.value) } catch (_) {}
-    currentSessionId.value = null
-  }
+  await lifecycle.disposeSession(props.panelId)
+  currentSessionId.value = null
   if (sc) {
     try { sc.stop() } catch (_) {}
     sc = null
@@ -220,6 +215,8 @@ onMounted(() => {
   } else if (currentSessionId.value) {
     status.value = 'connected'
     connect()
+  } else if (currentSessionId.value) {
+    status.value = 'connecting'
   } else {
     connect()
   }
