@@ -216,6 +216,7 @@ import type { ShortcutAction } from './types/settings'
 import { useI18n } from './i18n'
 import { CreateSession, CloseSession, RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, SessionStart, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
 import { getTerminalSize, waitForTerminalSize } from './services/terminalManager'
+import { usePanelLifecycle } from './services/panelLifecycle'
 import { msg } from './services/message'
 import type { ConnectionConfig } from './types/session'
 import { Application, Clipboard, Events } from '@wailsio/runtime'
@@ -274,6 +275,7 @@ const companionStore = useCompanionStore()
 const settingsStore = useSettingsStore()
 const localStateStore = useLocalStateStore()
 const containerStore = useContainerStore()
+const lifecycle = usePanelLifecycle()
 const syncStore = useSyncStore()
 const tunnelStore = useTunnelStore()
 const updateCheck = useUpdateCheck()
@@ -1198,6 +1200,9 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
       }
     }
   }
+  if (tab && tab.type === 'sftp') {
+    await lifecycle.disposePanel(tab.panelId)
+  }
   if (tab && tab.type === 'rdp') {
     const p = panelStore.getPanel(tab.panelId)
     if (p?.sessionId) {
@@ -1659,8 +1664,8 @@ async function createWslTerminal(distro: string, keepOpen?: boolean) {
   }
 }
 
-async function onConnectSftp(config: ConnectionConfig, prevStart?: any) {
-  connectionStore.add(config)
+async function onConnectSftp(config: ConnectionConfig, prevStart?: any, persist = true) {
+  if (persist) connectionStore.add(config)
 
   const resolved = await ensureCredentials(config)
   if (!resolved) return
@@ -1673,19 +1678,15 @@ async function onConnectSftp(config: ConnectionConfig, prevStart?: any) {
   const tab = tabStore.createSFPTab(displayTitle, panel.id)
   if (reposition) reposition(tab.id)
   panelStore.movePanelToTab(panel.id, tab.id)
-  RecordRecentConnection(config.id)
+  if (persist) RecordRecentConnection(config.id)
 
   try {
-    // Honor the connection's file-transfer protocol preference ('scp' for
-    // hosts without an SFTP subsystem); the panel/tab stay type 'sftp' since
-    // the file browser UI is protocol-agnostic.
     const proto = fileTransferProto(config)
-    const info = await CreateSession(proto, config)
-    panelStore.bindSession(panel.id, info.id)
+    await lifecycle.createSession(panel.id, proto, config)
   } catch (e) {
     console.error('Failed to create SFTP session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -1703,12 +1704,11 @@ async function onConnectWslFile(config: ConnectionConfig, prevStart?: any) {
   if (reposition) reposition(tab.id)
   panelStore.movePanelToTab(panel.id, tab.id)
   try {
-    const info = await CreateSession('wsl-file', fileConfig)
-    panelStore.bindSession(panel.id, info.id)
+    await lifecycle.createSession(panel.id, 'wsl-file', fileConfig)
   } catch (e) {
     console.error('Failed to create WSL file session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -1728,12 +1728,11 @@ async function onConnectScp(config: ConnectionConfig, prevStart?: any, persist =
   if (persist) RecordRecentConnection(config.id)
 
   try {
-    const info = await CreateSession('scp', config)
-    panelStore.bindSession(panel.id, info.id)
+    await lifecycle.createSession(panel.id, 'scp', config)
   } catch (e) {
     console.error('Failed to create SCP session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -1753,12 +1752,11 @@ async function onConnectFtp(config: ConnectionConfig, prevStart?: any, persist =
   if (persist) RecordRecentConnection(config.id)
 
   try {
-    const info = await CreateSession('ftp', config)
-    panelStore.bindSession(panel.id, info.id)
+    await lifecycle.createSession(panel.id, 'ftp', config)
   } catch (e) {
     console.error('Failed to create FTP session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -1778,12 +1776,11 @@ async function onConnectSmb(config: ConnectionConfig, prevStart?: any, persist =
   if (persist) RecordRecentConnection(config.id)
 
   try {
-    const info = await CreateSession('smb', config)
-    panelStore.bindSession(panel.id, info.id)
+    await lifecycle.createSession(panel.id, 'smb', config)
   } catch (e) {
     console.error('Failed to create SMB session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -1803,12 +1800,11 @@ async function onConnectWebdav(config: ConnectionConfig, prevStart?: any, persis
   if (persist) RecordRecentConnection(config.id)
 
   try {
-    const info = await CreateSession('webdav', config)
-    panelStore.bindSession(panel.id, info.id)
+    await lifecycle.createSession(panel.id, 'webdav', config)
   } catch (e) {
     console.error('Failed to create WebDAV session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -1825,12 +1821,11 @@ async function onConnectS3(config: ConnectionConfig, prevStart?: any, persist = 
   if (persist) RecordRecentConnection(config.id)
 
   try {
-    const info = await CreateSession('s3', config)
-    panelStore.bindSession(panel.id, info.id)
+    await lifecycle.createSession(panel.id, 's3', config)
   } catch (e) {
     console.error('Failed to create S3 session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
