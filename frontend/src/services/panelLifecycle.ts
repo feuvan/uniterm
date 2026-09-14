@@ -1,10 +1,6 @@
-import {
-  CloseSession,
-  CreateSession,
-  SessionStart,
-} from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelStore } from '../stores/panelStore'
 import { useSessionStore } from '../stores/sessionStore'
+import { backendSessionApi } from './backendSessionApi'
 import type { ConnectionConfig, SessionInfo } from '../types/session'
 
 export interface PanelLifecycleBackend {
@@ -126,6 +122,35 @@ export class PanelLifecycle {
       }
       throw error
     }
+  }
+
+  /**
+   * Create a session owned by a panel without replacing the panel's primary
+   * session. Companion SFTP and monitor sessions use this path.
+   */
+  async createChildSession(
+    panelId: string,
+    sessionType: string,
+    config: ConnectionConfig,
+  ): Promise<SessionInfo> {
+    if (!this.state.hasPanel(panelId)) {
+      throw new Error(`Cannot create a child session for missing panel ${panelId}`)
+    }
+    const generation = this.generations.get(panelId) ?? this.begin(panelId)
+    const info = await this.backend.createSession(sessionType, config)
+    if (!this.isCurrent(panelId, generation)) {
+      await this.closeQuietly(info.id)
+      throw new PanelLifecycleCancelledError()
+    }
+    this.trackSession(panelId, info.id)
+    this.state.initSession(info.id)
+    return info
+  }
+
+  async disposeOwnedSession(panelId: string, sessionId: string): Promise<void> {
+    this.sessions.get(panelId)?.delete(sessionId)
+    await this.closeQuietly(sessionId)
+    this.state.removeSession(sessionId)
   }
 
   /**
@@ -265,9 +290,9 @@ function createDefaultLifecycle(): PanelLifecycle {
   const sessionStore = useSessionStore()
   return new PanelLifecycle(
     {
-      createSession: (sessionType, config) => CreateSession(sessionType, config) as Promise<SessionInfo>,
-      closeSession: (sessionId) => CloseSession(sessionId),
-      startSession: (sessionId, config) => SessionStart(sessionId, config),
+      createSession: (sessionType, config) => backendSessionApi.createSession(sessionType, config),
+      closeSession: (sessionId) => backendSessionApi.closeSession(sessionId),
+      startSession: (sessionId, config) => backendSessionApi.startSession(sessionId, config),
     },
     {
       hasPanel: (panelId) => !!panelStore.getPanel(panelId),

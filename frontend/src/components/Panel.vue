@@ -153,6 +153,7 @@ import {
   OpenPathInExplorer,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelLifecycle } from '../services/panelLifecycle'
+import { msg } from '../services/message'
 import { useI18n } from '../i18n'
 import type { Panel } from '../types/workspace'
 import { waitForTerminalSize } from '../services/terminalManager'

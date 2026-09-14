@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { CreateSession, CloseSession, ListSessions } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { backendSessionApi } from '../services/backendSessionApi'
 import { usePanelStore } from './panelStore'
 import { useSessionStore } from './sessionStore'
 import { useTabStore } from './tabStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { useConnectionStore } from './connectionStore'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 import type { ConnectionConfig } from '../types/session'
@@ -56,6 +57,7 @@ export const useCompanionStore = defineStore('companion', () => {
   const panelStore = usePanelStore()
   const sessionStore = useSessionStore()
   const tabStore = useTabStore()
+  const lifecycle = usePanelLifecycle()
 
   function getActiveSshPanelId(): string | null {
     const pid = tabStore.getActivePanelId()
@@ -158,7 +160,7 @@ export const useCompanionStore = defineStore('companion', () => {
   async function sessionAlive(sessionId: string | undefined): Promise<boolean> {
     if (!sessionId) return false
     try {
-      const sessions = await ListSessions()
+      const sessions = await backendSessionApi.listSessions()
       const sess = sessions.find(s => s.id === sessionId)
       return sess?.status === 'connected' || sess?.status === 'connecting'
     } catch {
@@ -175,7 +177,7 @@ export const useCompanionStore = defineStore('companion', () => {
       return entry.sftpSessionId
     }
     if (entry.sftpSessionId) {
-      try { await CloseSession(entry.sftpSessionId) } catch { /* ignore */ }
+      await lifecycle.disposeOwnedSession(sshPanelId, entry.sftpSessionId)
       entry.sftpSessionId = undefined
     }
     if (entry.creatingSftp) {
@@ -192,30 +194,31 @@ export const useCompanionStore = defineStore('companion', () => {
       // the WSL file session over \\wsl.localhost\<distro>.
       if (isWslPanel(sshPanelId)) {
         config.type = 'wsl-file'
-        const info = await CreateSession('wsl-file', config)
+        const info = await lifecycle.createChildSession(sshPanelId, 'wsl-file', config)
         entries.value = {
           ...entries.value,
           [sshPanelId]: { ...entries.value[sshPanelId], sftpSessionId: info.id, creatingSftp: false },
         }
-        sessionStore.initSession(info.id)
         return info.id
       }
       // Honor the connection's file-transfer protocol preference: 'scp' for
       // hosts without an SFTP subsystem, 'sftp' (default) otherwise.
       const proto = fileTransferProto(config)
       config.type = proto
-      const info = await CreateSession(proto, config)
+      const info = await lifecycle.createChildSession(sshPanelId, proto, config)
       entries.value = {
         ...entries.value,
         [sshPanelId]: { ...entries.value[sshPanelId], sftpSessionId: info.id, creatingSftp: false },
       }
-      sessionStore.initSession(info.id)
       return info.id
     } catch (e) {
       console.error('companion sftp create failed:', e)
-      entries.value = {
-        ...entries.value,
-        [sshPanelId]: { ...entries.value[sshPanelId], creatingSftp: false },
+      const current = entries.value[sshPanelId]
+      if (current) {
+        entries.value = {
+          ...entries.value,
+          [sshPanelId]: { ...current, creatingSftp: false },
+        }
       }
       return null
     }
@@ -229,7 +232,7 @@ export const useCompanionStore = defineStore('companion', () => {
       return entry.monitorSessionId
     }
     if (entry.monitorSessionId) {
-      try { await CloseSession(entry.monitorSessionId) } catch { /* ignore */ }
+      await lifecycle.disposeOwnedSession(sshPanelId, entry.monitorSessionId)
       entry.monitorSessionId = undefined
     }
     if (entry.creatingMonitor) {
@@ -243,18 +246,20 @@ export const useCompanionStore = defineStore('companion', () => {
     entry.creatingMonitor = true
     try {
       config.type = 'monitor'
-      const info = await CreateSession('monitor', config)
+      const info = await lifecycle.createChildSession(sshPanelId, 'monitor', config)
       entries.value = {
         ...entries.value,
         [sshPanelId]: { ...entries.value[sshPanelId], monitorSessionId: info.id, creatingMonitor: false },
       }
-      sessionStore.initSession(info.id)
       return info.id
     } catch (e) {
       console.error('companion monitor create failed:', e)
-      entries.value = {
-        ...entries.value,
-        [sshPanelId]: { ...entries.value[sshPanelId], creatingMonitor: false },
+      const current = entries.value[sshPanelId]
+      if (current) {
+        entries.value = {
+          ...entries.value,
+          [sshPanelId]: { ...current, creatingMonitor: false },
+        }
       }
       return null
     }
@@ -306,10 +311,10 @@ export const useCompanionStore = defineStore('companion', () => {
     const monitorId = entry.monitorSessionId
     delete entries.value[sshPanelId]
     if (sftpId) {
-      try { await CloseSession(sftpId) } catch { /* ignore */ }
+      await lifecycle.disposeOwnedSession(sshPanelId, sftpId)
     }
     if (monitorId) {
-      try { await CloseSession(monitorId) } catch { /* ignore */ }
+      await lifecycle.disposeOwnedSession(sshPanelId, monitorId)
     }
   }
 

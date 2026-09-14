@@ -40,6 +40,7 @@ export const useContainerStore = defineStore('container', {
         }
         const lifecycle = usePanelLifecycle()
         const release = lifecycle.registerResource(tab.panelId, () => {
+          resourceReleases.delete(tab.id)
           const current = this.sessions[tab.id]
           if (current === s) {
             client.disconnect(s.connId)

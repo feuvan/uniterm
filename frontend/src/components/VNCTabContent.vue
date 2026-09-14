@@ -70,6 +70,7 @@ import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { Loader } from '@lucide/vue'
 import { useI18n } from '../i18n'
 import { usePanelStore } from '../stores/panelStore'
+import type { ConnectionConfig } from '../types/session'
 import { Clipboard, Events } from '@wailsio/runtime'
 import { usePanelLifecycle } from '../services/panelLifecycle'
 const { t } = useI18n()

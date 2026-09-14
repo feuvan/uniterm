@@ -214,7 +214,7 @@ import { useDuplicateSession } from './composables/useDuplicateSession'
 import type { ShortcutAction } from './types/settings'
 import { useI18n } from './i18n'
 import { RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
-import { getTerminalSize, waitForTerminalSize } from './services/terminalManager'
+import { waitForTerminalSize } from './services/terminalManager'
 import { usePanelLifecycle } from './services/panelLifecycle'
 import { msg } from './services/message'
 import type { ConnectionConfig } from './types/session'
@@ -1029,13 +1029,13 @@ const actionHandlers: Record<ShortcutAction, () => void> = {
     if (t.locked) return
     if (t.type === 'workspace' && t.panelIds.length > 1) {
       const panelId = t.activePanelId || t.panelIds[t.panelIds.length - 1]
-      await lifecycle.disposePanel(panelId)
       await companionStore.disposeForPanel(panelId).catch(() => {})
+      await lifecycle.disposePanel(panelId)
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
     } else if (t.type === 'workspace' && t.panelIds.length === 1) {
       const panelId = t.panelIds[0]
-      await lifecycle.disposePanel(panelId)
       await companionStore.disposeForPanel(panelId).catch(() => {})
+      await lifecycle.disposePanel(panelId)
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
     } else {
       await closeTab(t.id)
@@ -1201,7 +1201,7 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
   // Dispose SSH companion sidebars (sftp/monitor) before removing their owner
   // panels. Their child resources will be moved into the shared lifecycle in a
   // later phase.
-  companionStore.disposeForPanels(panelIds).catch(() => {})
+  await companionStore.disposeForPanels(panelIds).catch(() => {})
   await lifecycle.disposePanels(panelIds)
   nextTick(() => {
     if (tabStore.tabs.length === 0) {

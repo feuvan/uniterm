@@ -89,6 +89,17 @@ describe('PanelLifecycle', () => {
     expect(order).toEqual(['session-created', 'resource'])
   })
 
+  it('tracks child sessions without replacing the primary panel binding', async () => {
+    const fixture = createFixture()
+    const primary = await fixture.lifecycle.createSession('panel-1', 'ssh', config)
+    const child = await fixture.lifecycle.createChildSession('panel-1', 'monitor', config)
+
+    expect(fixture.sessions.get('panel-1')).toBe(primary.id)
+    await fixture.lifecycle.disposePanel('panel-1')
+    expect(fixture.closed).toEqual([primary.id, child.id])
+    expect(fixture.removedSessions).toEqual([primary.id, child.id])
+  })
+
   it('closes a session that resolves after the panel was disposed', async () => {
     const fixture = createFixture()
     let resolveCreate!: (info: SessionInfo) => void
@@ -96,7 +107,7 @@ describe('PanelLifecycle', () => {
     const lifecycle = new PanelLifecycle(
       {
         createSession: async () => pending,
-        closeSession: async id => fixture.closed.push(id),
+        closeSession: async id => { fixture.closed.push(id) },
         startSession: async () => {},
       },
       fixture.state,
@@ -117,7 +128,7 @@ describe('PanelLifecycle', () => {
     const error = new Error('start failed')
     const startFailBackend: PanelLifecycleBackend = {
       createSession: fixture.backend.createSession,
-      closeSession: async id => fixture.closed.push(id),
+      closeSession: async id => { fixture.closed.push(id) },
       startSession: async () => { throw error },
     }
     const lifecycle = new PanelLifecycle(startFailBackend, fixture.state)

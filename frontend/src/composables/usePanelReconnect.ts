@@ -4,9 +4,9 @@
 // 「重连」 and the refresh-triggered auto-reconnect share one implementation:
 // close the old session, create a fresh one from the panel's stored config,
 // rebind the panel, and wait for the new session to report connected.
-import { ListSessions } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelStore } from '../stores/panelStore'
 import { usePanelLifecycle } from '../services/panelLifecycle'
+import { backendSessionApi } from '../services/backendSessionApi'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 
 // One in-flight reconnect per panel: concurrent triggers (refresh spam, a
@@ -60,9 +60,9 @@ async function waitUntilConnected(sid: string): Promise<boolean> {
   const deadline = Date.now() + CONNECT_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
-      const sessions = await ListSessions()
-      // ListSessions comes from the untyped Wails bindings (same as callers
-      // like FileTabContent's probe), so the shape is annotated locally.
+      const sessions = await backendSessionApi.listSessions()
+      // Session records are normalized by the typed backend adapter so this
+      // reconnect path does not depend on the generated binding's JS shape.
       const status = (sessions as Array<{ id: string; status: string }>)
         .find(s => s.id === sid)?.status
       if (status === 'connected') return true
