@@ -153,8 +153,9 @@ import {
   OpenPathInExplorer,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelLifecycle } from '../services/panelLifecycle'
+import { msg } from '../services/message'
 import { useI18n } from '../i18n'
-import type { Panel } from '../types/workspace'
+import type { Panel, WorkspaceTab } from '../types/workspace'
 import { waitForTerminalSize } from '../services/terminalManager'
 import { connectFileMenuKey } from '../utils/fileTransferUtils'
 import type { ConnectionConfig } from '../types/session'
@@ -209,7 +210,7 @@ const panelShortcut = computed(() => {
   return formatDigitShortcut(prefix, props.shortcutIndex, isMac)
 })
 const workspaceTab = computed(() =>
-  props.workspaceId ? tabStore.tabs.find(tab => tab.id === props.workspaceId && tab.type === 'workspace') : undefined
+  props.workspaceId ? tabStore.tabs.find((tab): tab is WorkspaceTab => tab.id === props.workspaceId && tab.type === 'workspace') : undefined
 )
 const isMaximized = computed(() => workspaceTab.value?.maximizedPanelId === props.panel.id)
 const maximizeTitle = computed(() => {
@@ -453,6 +454,7 @@ async function retryConnection() {
     try {
       const shellPath = props.panel.config?.shellPath || ''
       const config: ConnectionConfig = {
+        id: '', name: props.panel.title, host: '', port: 0, user: '', authType: 'password',
         ...props.panel.config,
         type: 'local',
         shellPath,
@@ -496,6 +498,7 @@ async function retryConnection() {
         if (!c.containerExecConnId || !c.containerExecContainerId) throw new Error('exec session parameters missing')
         info = await ContainerExecSession(c.containerExecConnId, c.containerExecContainerId, c.containerExecShell || 'sh')
       }
+      if (!info?.id) throw new Error('Backend returned an empty exec session')
       await lifecycle.adoptSession(props.panel.id, info.id, generation)
       sessionStore.updateStatus(info.id, 'connected')
     } catch (e: any) {

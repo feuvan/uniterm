@@ -74,14 +74,16 @@ const k8sStore = useK8sStore()
 
 const connId = ref<string>('')
 let unregisterConnection: (() => void) | null = null
+let connectGeneration = 0
 const error = ref('')
 
-function releaseConnection() {
+async function releaseConnection() {
+  connectGeneration++
   unregisterConnection?.()
   unregisterConnection = null
   const id = connId.value
   connId.value = ''
-  if (id) k8sClient.disconnect(id)
+  if (id) await k8sClient.disconnect(id)
 }
 
 const initialNamespace = ref<string>(props.tab.namespace || '')
@@ -247,6 +249,10 @@ function onResizeEnd() {
 }
 
 async function connect() {
+  const generation = ++connectGeneration
+  const current = () => generation === connectGeneration && lifecycle.isOpen(props.tab.panelId)
+  if (!current()) return
+  error.value = ''
   k8sStore.setConnStatus(props.connection.id, 'connecting')
   try {
     const cfg = props.connection
@@ -256,6 +262,7 @@ async function connect() {
     let tunnelPassword = ''
     if (cfg.tunnelSSHConnId) {
       const creds = await resolveTunnelCredentials(cfg.tunnelSSHConnId)
+      if (!current()) return
       if (!creds) {
         error.value = 'Tunnel credentials cancelled'
         return
@@ -263,7 +270,7 @@ async function connect() {
       tunnelUser = creds.user
       tunnelPassword = creds.password
     }
-    connId.value = await k8sClient.connect(
+    const id = await k8sClient.connect(
       source,
       isPath,
       cfg.k8sContext || '',
@@ -271,10 +278,16 @@ async function connect() {
       tunnelUser,
       tunnelPassword
     )
+    if (!current()) {
+      await k8sClient.disconnect(id)
+      return
+    }
+    connId.value = id
     unregisterConnection = lifecycle.registerResource(props.tab.panelId, releaseConnection)
     k8sStore.setConnStatus(props.connection.id, 'connected')
     loadNamespaces()
   } catch (e: any) {
+    if (!current()) return
     k8sStore.setConnStatus(props.connection.id, 'error')
     error.value = String(e?.message || e)
   }
@@ -289,7 +302,7 @@ function onReconnectEvent(e: Event) {
 // normal connect() (which already resets error state and re-resolves tunnel
 // credentials on each call).
 async function reconnect() {
-  releaseConnection()
+  await releaseConnection().catch(() => {})
   await connect()
 }
 
@@ -304,7 +317,7 @@ onBeforeUnmount(() => {
     document.removeEventListener('mousemove', onResizeMove)
     document.removeEventListener('mouseup', onResizeEnd)
   }
-  releaseConnection()
+  void releaseConnection().catch(() => {})
 })
 </script>
 

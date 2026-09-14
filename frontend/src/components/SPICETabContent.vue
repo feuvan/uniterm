@@ -70,8 +70,9 @@ const scaleViewport = ref(false)
 let sc: any = null
 let unsubStatus: (() => void) | null = null
 let isIniting = false
+let initGeneration = 0
 const lifecycle = usePanelLifecycle()
-lifecycle.registerResource(props.panelId, () => {
+const releaseClient = lifecycle.registerResource(props.panelId, () => {
   try { sc?.stop() } catch (_) {}
   sc = null
 })
@@ -94,18 +95,22 @@ async function connect() {
 }
 
 async function reconnect() {
+  initGeneration++
+  isIniting = false
   await lifecycle.disposeSession(props.panelId)
   currentSessionId.value = null
   if (sc) {
     try { sc.stop() } catch (_) {}
     sc = null
   }
+  status.value = 'disconnected'
   await connect()
 }
 
 async function initSpice(proxyAddr: string, password: string) {
   if (isIniting) return
   isIniting = true
+  const generation = ++initGeneration
 
   if (sc) {
     try { sc.stop() } catch (_) {}
@@ -122,6 +127,7 @@ async function initSpice(proxyAddr: string, password: string) {
 
   try {
     const { SpiceMainConn } = await import('../vendor/spice-html5.js')
+    if (generation !== initGeneration || !lifecycle.isOpen(props.panelId) || !spiceContainer.value) return
     sc = new SpiceMainConn({
       uri: proxyAddr,
       password: password || '',
@@ -134,11 +140,12 @@ async function initSpice(proxyAddr: string, password: string) {
       },
     })
   } catch (e: any) {
+    if (generation !== initGeneration) return
     console.error('Failed to create SpiceMainConn:', e)
     status.value = 'error'
+  } finally {
+    if (generation === initGeneration) isIniting = false
   }
-
-  isIniting = false
 }
 
 // Paste into the SPICE remote via the native paste event (Ctrl+V / context menu).
@@ -203,18 +210,17 @@ onMounted(() => {
     const children = Array.from(cached.container.children)
     children.forEach(child => spiceContainer.value!.appendChild(child))
     sc = cached.sc
-    panelStore.removeSPICECache(props.panelId)
+    panelStore.takeSPICECache(props.panelId)
+    cached.container.remove()
     status.value = 'connected'
-    return
   }
 
   const storedProxy = panelStore.getProxyAddr(props.panelId)
-  if (storedProxy && props.config) {
+  if (cached) {
+    // Ownership moved from the cache; keep installing the view's listeners.
+  } else if (storedProxy && props.config) {
     status.value = 'connected'
     initSpice(storedProxy, props.config.password || '')
-  } else if (currentSessionId.value) {
-    status.value = 'connected'
-    connect()
   } else if (currentSessionId.value) {
     status.value = 'connecting'
   } else {
@@ -261,6 +267,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  initGeneration++
+  releaseClient()
   unsubStatus?.()
   window.removeEventListener('panel:reconnect', onReconnectEvent)
 
@@ -272,7 +280,7 @@ onBeforeUnmount(() => {
   }
 
   // Cache DOM + SPICE so switching back is instant
-  if (sc && spiceContainer.value && spiceContainer.value.childElementCount > 0) {
+  if (lifecycle.isOpen(props.panelId) && sc && spiceContainer.value && spiceContainer.value.childElementCount > 0) {
     const container = document.createElement('div')
     container.style.display = 'none'
     const children = Array.from(spiceContainer.value.children)

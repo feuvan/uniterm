@@ -128,7 +128,7 @@ import {
   RDPSetFullScreen,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { msg } from '../services/message'
-import type { TerminalTab, SettingsTab, SFTPTab, RDPTab, VNCTab, SPICETab, DBTab, MonitorTab, WorkspaceTab } from '../types/workspace'
+import type { Tab, TerminalTab, SFTPTab, RDPTab } from '../types/workspace'
 import { connectFileMenuKey, fileTransferProto } from '../utils/fileTransferUtils'
 import { connectionTypeIconOfKind } from '../utils/connectionTypes'
 import { useDuplicateSession } from '../composables/useDuplicateSession'
@@ -139,7 +139,7 @@ import { Clipboard } from '@wailsio/runtime'
 import { SquareTerminal, FolderUp, X, ArrowDownUp, Lock, Radio } from '@lucide/vue'
 
 const props = defineProps<{
-  tab: TerminalTab | SettingsTab | SFTPTab | RDPTab | VNCTab | SPICETab | DBTab | MonitorTab | WorkspaceTab
+  tab: Tab
   shortcutIndex?: number
   isActive: boolean
   hasNotification?: boolean
@@ -254,7 +254,7 @@ const showBroadcastIcon = computed(() =>
 
 
 const hasActiveTransfers = computed(() => {
-  if (props.tab.type === 'workspace') return false
+  if (!('panelId' in props.tab)) return false
   const keys = [props.tab.panelId]
   // Terminal tabs also surface their companion file panel's transfers.
   if (props.tab.type === 'terminal') {

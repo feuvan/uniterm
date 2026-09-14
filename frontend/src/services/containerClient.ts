@@ -10,7 +10,7 @@ import type {
   ContainerInfo, InspectResult, ContainerImage, ContainerStats as ContainerStatsInfo, ContainerCreateOptions,
 } from '../types/container'
 
-export const connect = (id: string) => ContainerConnect(id)
+export const connect = async (id: string): Promise<void> => { await ContainerConnect(id) }
 export const disconnect = (id: string) => ContainerDisconnect(id)
 export const list = (id: string) => ContainerList(id) as Promise<ContainerInfo[]>
 export const inspect = (id: string, cid: string) => ContainerInspect(id, cid) as Promise<InspectResult>
@@ -22,8 +22,11 @@ export const removeImage = (id: string, imageID: string) => ContainerRemoveImage
 export const create = (id: string, opts: ContainerCreateOptions) => ContainerCreate(id, opts as any)
 export const namespaces = (id: string) => ContainerNamespaces(id) as Promise<string[]>
 export const setNamespace = (connId: string, ns: string) => ContainerSetNamespace(connId, ns)
-export const execSession = (connId: string, cid: string, shell: string) =>
-  ContainerExecSession(connId, cid, shell)
+export const execSession = async (connId: string, cid: string, shell: string) => {
+  const info = await ContainerExecSession(connId, cid, shell)
+  if (!info?.id) throw new Error('Backend returned an empty container exec session')
+  return info
+}
 
 export interface StreamHandle {
   id: string

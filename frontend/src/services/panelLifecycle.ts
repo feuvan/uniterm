@@ -1,10 +1,7 @@
-import {
-  CloseSession,
-  CreateSession,
-  SessionStart,
-} from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelStore } from '../stores/panelStore'
 import { useSessionStore } from '../stores/sessionStore'
+import { backendSessionApi } from './backendSessionApi'
+import { unregisterTransferRoute } from './transferTaskCenter'
 import type { ConnectionConfig, SessionInfo } from '../types/session'
 
 export interface PanelLifecycleBackend {
@@ -35,19 +32,18 @@ export class PanelLifecycleCancelledError extends Error {
 }
 
 /**
- * Owns the backend sessions attached to panels.
- *
- * The class is deliberately independent of Pinia and Wails. The production
- * instance is wired by usePanelLifecycle(), while tests can inject a small
- * fake backend and state adapter. A generation is advanced whenever a panel
- * is closed or a new session operation starts, so a late CreateSession result
- * can never be attached to a panel that has already moved on.
+ * Owns primary/child sessions and protocol resources, independent of the UI
+ * tab kind. All async results are checked against the operation that requested
+ * them. Closing invalidates operations synchronously, before any IPC is awaited.
+ * The injected backend/state adapters allow deterministic race tests.
  */
 export class PanelLifecycle {
+  private nextGeneration = 0
   private generations = new Map<string, number>()
-  private disposedPanels = new Set<string>()
+  private closingPanels = new Set<string>()
   private sessions = new Map<string, Set<string>>()
   private resources = new Map<string, Set<() => void | Promise<void>>>()
+  private closingSessions = new Map<string, Promise<void>>()
   private sessionDisposals = new Map<string, Promise<void>>()
   private panelDisposals = new Map<string, Promise<void>>()
 
@@ -56,24 +52,24 @@ export class PanelLifecycle {
     private readonly state: PanelLifecycleState,
   ) {}
 
+  isOpen(panelId: string): boolean {
+    return this.state.hasPanel(panelId) && !this.closingPanels.has(panelId)
+  }
+
   /** Start a new operation and invalidate the previous operation for a panel. */
   begin(panelId: string): number {
-    const generation = (this.generations.get(panelId) ?? 0) + 1
-    this.generations.set(panelId, generation)
-    return generation
+    if (!this.isOpen(panelId)) throw new PanelLifecycleCancelledError()
+    return this.invalidate(panelId)
   }
 
   isCurrent(panelId: string, generation: number): boolean {
-    return this.generations.get(panelId) === generation && this.state.hasPanel(panelId)
+    return this.generations.get(panelId) === generation && this.isOpen(panelId)
   }
 
-  /**
-   * Register a non-session resource owned by a panel, such as a proxy,
-   * manager connection, child process, or companion session.
-   */
+  /** Register a panel-owned client/manager. The returned function unregisters it. */
   registerResource(panelId: string, dispose: () => void | Promise<void>): () => void {
-    if (this.disposedPanels.has(panelId)) {
-      Promise.resolve().then(dispose).catch(() => {})
+    if (!this.isOpen(panelId)) {
+      void Promise.resolve().then(dispose).catch(() => {})
       return () => {}
     }
     let panelResources = this.resources.get(panelId)
@@ -82,7 +78,12 @@ export class PanelLifecycle {
       this.resources.set(panelId, panelResources)
     }
     panelResources.add(dispose)
-    return () => panelResources?.delete(dispose)
+    return () => {
+      panelResources.delete(dispose)
+      if (!panelResources.size && this.resources.get(panelId) === panelResources) {
+        this.resources.delete(panelId)
+      }
+    }
   }
 
   async createSession(
@@ -91,141 +92,153 @@ export class PanelLifecycle {
     config: ConnectionConfig,
     options: SessionCreateOptions = {},
   ): Promise<SessionInfo> {
-    if (!this.state.hasPanel(panelId)) {
-      throw new Error(`Cannot create a session for missing panel ${panelId}`)
-    }
-
     const generation = this.begin(panelId)
-    let info: SessionInfo | undefined
-    try {
-      info = await this.backend.createSession(sessionType, config)
-      if (!this.isCurrent(panelId, generation)) {
-        await this.closeQuietly(info.id)
-        throw new PanelLifecycleCancelledError()
-      }
+    // Also handles callers that replace a session without an explicit dispose.
+    // The token is captured BEFORE waiting: an older reconnect cannot wake up
+    // after a newer one and supersede it.
+    await this.releaseSessions(panelId)
+    if (!this.isCurrent(panelId, generation)) throw new PanelLifecycleCancelledError()
 
-      this.trackSession(panelId, info.id)
-      this.state.initSession(info.id)
-      this.state.bindSession(panelId, info.id)
-
-      if (options.start) {
-        try {
-          await this.backend.startSession(info.id, config)
-        } catch (error) {
-          await this.closeSessionAfterFailure(panelId, info.id)
-          throw error
-        }
-      }
-      return info
-    } catch (error) {
-      // createSession can fail before an info value exists. If it did return
-      // an id, closeSessionAfterFailure has already handled start failures;
-      // this branch only handles an error thrown after a successful create.
-      if (info && this.isTracked(panelId, info.id)) {
-        await this.closeSessionAfterFailure(panelId, info.id)
-      }
-      throw error
+    const info = await this.backend.createSession(sessionType, config)
+    await this.adoptSession(panelId, info.id, generation)
+    if (!this.isCurrent(panelId, generation)) {
+      await this.disposeOwnedSession(panelId, info.id)
+      throw new PanelLifecycleCancelledError()
     }
+    if (options.start) await this.startSession(panelId, info.id, config)
+    return info
   }
 
-  /**
-   * Adopt a session created by a protocol-specific endpoint such as K8s exec
-   * or container exec. The caller starts the generation before its async IPC
-   * call and passes it back here to get the same late-result protection as
-   * CreateSession.
-   */
+  /** Create a companion without replacing the panel's primary binding. */
+  async createChildSession(
+    panelId: string,
+    sessionType: string,
+    config: ConnectionConfig,
+  ): Promise<SessionInfo> {
+    if (!this.isOpen(panelId)) throw new PanelLifecycleCancelledError()
+    const generation = this.generations.get(panelId) ?? this.begin(panelId)
+    await this.sessionDisposals.get(panelId)
+    if (!this.isCurrent(panelId, generation)) throw new PanelLifecycleCancelledError()
+    const info = await this.backend.createSession(sessionType, config)
+    if (!this.isCurrent(panelId, generation)) {
+      await this.closeQuietly(info.id)
+      throw new PanelLifecycleCancelledError()
+    }
+    this.trackSession(panelId, info.id)
+    try {
+      this.state.initSession(info.id)
+    } catch (error) {
+      await this.disposeOwnedSession(panelId, info.id)
+      throw error
+    }
+    return info
+  }
+
+  async disposeOwnedSession(panelId: string, sessionId: string): Promise<void> {
+    const owned = this.sessions.get(panelId)?.delete(sessionId)
+    const bound = this.state.getSessionId(panelId) === sessionId
+    if (bound) this.state.unbindSession(panelId)
+    if (!this.sessions.get(panelId)?.size) this.sessions.delete(panelId)
+    if (owned || bound) await this.closeQuietly(sessionId)
+    else await this.closingSessions.get(sessionId)
+  }
+
+  /** Adopt an exec session returned by a protocol-specific endpoint. */
   async adoptSession(panelId: string, sessionId: string, generation: number): Promise<void> {
     if (!this.isCurrent(panelId, generation)) {
       await this.closeQuietly(sessionId)
       throw new PanelLifecycleCancelledError()
     }
     this.trackSession(panelId, sessionId)
-    this.state.initSession(sessionId)
-    this.state.bindSession(panelId, sessionId)
-  }
-
-  /** Start a session that was created and bound earlier, such as a terminal. */
-  async startSession(panelId: string, sessionId: string, config: ConnectionConfig): Promise<void> {
-    if (!this.state.hasPanel(panelId) || this.state.getSessionId(panelId) !== sessionId) {
-      await this.closeQuietly(sessionId)
-      throw new PanelLifecycleCancelledError()
-    }
     try {
-      await this.backend.startSession(sessionId, config)
+      this.state.initSession(sessionId)
+      this.state.bindSession(panelId, sessionId)
     } catch (error) {
-      await this.closeSessionAfterFailure(panelId, sessionId)
+      await this.disposeOwnedSession(panelId, sessionId)
       throw error
     }
   }
 
-  /** Close the currently attached session while keeping the panel alive. */
-  async disposeSession(panelId: string): Promise<void> {
-    const existing = this.sessionDisposals.get(panelId)
-    if (existing) return existing
-
-    const disposal = this.disposeSessionInternal(panelId).finally(() => {
-      this.sessionDisposals.delete(panelId)
-    })
-    this.sessionDisposals.set(panelId, disposal)
-    return disposal
+  /** Start only after the terminal has measured its actual PTY dimensions. */
+  async startSession(panelId: string, sessionId: string, config: ConnectionConfig): Promise<void> {
+    const generation = this.generations.get(panelId)
+    const isCurrent = () => generation !== undefined
+      && this.isCurrent(panelId, generation)
+      && this.state.getSessionId(panelId) === sessionId
+    if (!isCurrent()) {
+      await this.disposeOwnedSession(panelId, sessionId)
+      throw new PanelLifecycleCancelledError()
+    }
+    try {
+      await this.backend.startSession(sessionId, config)
+      if (!isCurrent()) throw new PanelLifecycleCancelledError()
+    } catch (error) {
+      await this.disposeOwnedSession(panelId, sessionId)
+      throw error
+    }
   }
 
-  /** Close all resources and remove the panel's frontend state. */
-  async disposePanel(panelId: string): Promise<void> {
+  /** Close primary and child sessions while retaining the panel for retry. */
+  disposeSession(panelId: string): Promise<void> {
+    if (!this.state.hasPanel(panelId)) return Promise.resolve()
+    this.invalidate(panelId)
+    return this.releaseSessions(panelId)
+  }
+
+  /** Mark closed immediately; all callers share the same in-flight teardown. */
+  disposePanel(panelId: string): Promise<void> {
     const existing = this.panelDisposals.get(panelId)
     if (existing) return existing
-    this.disposedPanels.add(panelId)
-
-    const disposal = this.disposePanelInternal(panelId).finally(() => {
+    if (!this.state.hasPanel(panelId)) return Promise.resolve()
+    this.closingPanels.add(panelId)
+    this.invalidate(panelId)
+    // Defer the work until the promise is registered, including for reentrant
+    // calls from resource disposers and reactive state watchers.
+    const disposal = Promise.resolve().then(() => this.disposePanelInternal(panelId)).finally(() => {
       this.panelDisposals.delete(panelId)
+      this.closingPanels.delete(panelId)
+      this.generations.delete(panelId)
     })
     this.panelDisposals.set(panelId, disposal)
     return disposal
   }
 
   async disposePanels(panelIds: string[]): Promise<void> {
-    for (const panelId of panelIds) {
-      await this.disposePanel(panelId)
-    }
+    // Invalidate EVERY panel before waiting on the first slow backend close.
+    await Promise.all(panelIds.map(panelId => this.disposePanel(panelId)))
   }
 
-  private async disposeSessionInternal(panelId: string): Promise<void> {
-    // Invalidates pending CreateSession continuations before collecting the
-    // currently known ids. A late result will see the new generation and close
-    // itself when the IPC promise resolves.
-    this.begin(panelId)
+  private invalidate(panelId: string): number {
+    const generation = ++this.nextGeneration
+    this.generations.set(panelId, generation)
+    return generation
+  }
 
-    const ids = new Set(this.sessions.get(panelId) ?? [])
-    const currentId = this.state.getSessionId(panelId)
-    if (currentId) ids.add(currentId)
-
-    this.sessions.delete(panelId)
-    this.state.unbindSession(panelId)
-    for (const sessionId of ids) {
-      await this.closeQuietly(sessionId)
-      this.state.removeSession(sessionId)
-    }
+  private releaseSessions(panelId: string): Promise<void> {
+    const existing = this.sessionDisposals.get(panelId)
+    if (existing) return existing
+    const disposal = Promise.resolve().then(async () => {
+      const ids = new Set(this.sessions.get(panelId) ?? [])
+      const currentId = this.state.getSessionId(panelId)
+      if (currentId) ids.add(currentId)
+      // Reverse creation order releases children before their parent session.
+      for (const sessionId of [...ids].reverse()) {
+        await this.disposeOwnedSession(panelId, sessionId)
+      }
+    }).finally(() => this.sessionDisposals.delete(panelId))
+    this.sessionDisposals.set(panelId, disposal)
+    return disposal
   }
 
   private async disposePanelInternal(panelId: string): Promise<void> {
-    await this.disposeSession(panelId)
-
     const panelResources = this.resources.get(panelId)
     this.resources.delete(panelId)
-    if (panelResources) {
-      // Dispose in reverse registration order so child resources go first.
-      for (const dispose of [...panelResources].reverse()) {
-        try {
-          await dispose()
-        } catch {
-          // A panel close should release every remaining resource even if one
-          // protocol-specific disposer has already failed.
-        }
-      }
+    // Stop clients/streams before shutting down the session/proxy they use.
+    for (const dispose of [...(panelResources ?? [])].reverse()) {
+      try { await dispose() } catch { /* release the rest even if one fails */ }
     }
-
+    await this.releaseSessions(panelId)
     this.state.removePanel(panelId)
-    this.generations.delete(panelId)
   }
 
   private trackSession(panelId: string, sessionId: string): void {
@@ -237,53 +250,51 @@ export class PanelLifecycle {
     ids.add(sessionId)
   }
 
-  private isTracked(panelId: string, sessionId: string): boolean {
-    return this.sessions.get(panelId)?.has(sessionId) ?? false
-  }
-
-  private async closeSessionAfterFailure(panelId: string, sessionId: string): Promise<void> {
-    this.sessions.get(panelId)?.delete(sessionId)
-    if (this.state.getSessionId(panelId) === sessionId) {
-      this.state.unbindSession(panelId)
-    }
-    this.state.removeSession(sessionId)
-    await this.closeQuietly(sessionId)
-  }
-
-  private async closeQuietly(sessionId: string): Promise<void> {
-    try {
-      await this.backend.closeSession(sessionId)
-    } catch {
-      // Closing is best-effort. The state cleanup must continue even when the
-      // backend has already removed the session or the Wails call fails.
-    }
+  private closeQuietly(sessionId: string): Promise<void> {
+    const existing = this.closingSessions.get(sessionId)
+    if (existing) return existing
+    const disposal = Promise.resolve().then(async () => {
+      try {
+        await this.backend.closeSession(sessionId)
+      } catch {
+        // State cleanup must continue even if the backend already removed it.
+      } finally {
+        // Includes early events from late/never-bound CreateSession results.
+        this.state.removeSession(sessionId)
+      }
+    }).finally(() => this.closingSessions.delete(sessionId))
+    this.closingSessions.set(sessionId, disposal)
+    return disposal
   }
 }
 
 function createDefaultLifecycle(): PanelLifecycle {
   const panelStore = usePanelStore()
   const sessionStore = useSessionStore()
-  return new PanelLifecycle(
-    {
-      createSession: (sessionType, config) => CreateSession(sessionType, config) as Promise<SessionInfo>,
-      closeSession: (sessionId) => CloseSession(sessionId),
-      startSession: (sessionId, config) => SessionStart(sessionId, config),
+  return new PanelLifecycle(backendSessionApi, {
+    hasPanel: (panelId) => !!panelStore.getPanel(panelId),
+    getSessionId: (panelId) => panelStore.getPanel(panelId)?.sessionId ?? null,
+    bindSession: (panelId, sessionId) => panelStore.bindSession(panelId, sessionId),
+    unbindSession: (panelId) => panelStore.unbindSession(panelId),
+    initSession: (sessionId) => sessionStore.initSession(sessionId),
+    removeSession: (sessionId) => {
+      unregisterTransferRoute(sessionId)
+      sessionStore.removeSession(sessionId)
     },
-    {
-      hasPanel: (panelId) => !!panelStore.getPanel(panelId),
-      getSessionId: (panelId) => panelStore.getPanel(panelId)?.sessionId ?? null,
-      bindSession: (panelId, sessionId) => panelStore.bindSession(panelId, sessionId),
-      unbindSession: (panelId) => panelStore.unbindSession(panelId),
-      initSession: (sessionId) => sessionStore.initSession(sessionId),
-      removeSession: (sessionId) => sessionStore.removeSession(sessionId),
-      removePanel: (panelId) => panelStore.removePanel(panelId),
-    },
-  )
+    removePanel: (panelId) => panelStore.removePanel(panelId),
+  })
 }
 
-let defaultLifecycle: PanelLifecycle | null = null
+// A lifecycle belongs to its Pinia panel store, not to a previous test/app's
+// stores. Weak keys also avoid keeping an unmounted application's stores alive.
+const lifecycles = new WeakMap<ReturnType<typeof usePanelStore>, PanelLifecycle>()
 
 export function usePanelLifecycle(): PanelLifecycle {
-  if (!defaultLifecycle) defaultLifecycle = createDefaultLifecycle()
-  return defaultLifecycle
+  const panelStore = usePanelStore()
+  let lifecycle = lifecycles.get(panelStore)
+  if (!lifecycle) {
+    lifecycle = createDefaultLifecycle()
+    lifecycles.set(panelStore, lifecycle)
+  }
+  return lifecycle
 }

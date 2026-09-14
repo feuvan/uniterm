@@ -91,9 +91,13 @@ const desktopEnvDisplay = computed(() => {
 })
 
 let unsubStatus: (() => void) | null = null
+let connectGeneration = 0
 
 async function start() {
   if (!props.config) return
+  const generation = ++connectGeneration
+  const current = () => generation === connectGeneration && lifecycle.isOpen(props.panelId)
+  let ownedSessionId: string | null = null
   status.value = 'connecting'
   lastError.value = ''
   try {
@@ -102,13 +106,20 @@ async function start() {
     console.warn('X11 desktop: GetPlatform failed', e)
   }
   try {
+    if (!current()) return
     const info = await lifecycle.createSession(props.panelId, 'x11-desktop', { ...props.config })
+    ownedSessionId = info.id
+    if (!current()) {
+      await lifecycle.disposeOwnedSession(props.panelId, info.id)
+      return
+    }
     currentSessionId.value = info.id
     await X11DesktopConnect(props.config.id, info.id)
-    status.value = 'connected'
+    if (current()) status.value = 'connected'
   } catch (e: any) {
+    if (ownedSessionId) await lifecycle.disposeOwnedSession(props.panelId, ownedSessionId)
+    if (!current()) return
     console.error('X11 desktop connect error:', e)
-    await lifecycle.disposeSession(props.panelId)
     currentSessionId.value = null
     lastError.value = backendErrorText(e)
     status.value = 'error'
@@ -116,15 +127,13 @@ async function start() {
 }
 
 async function disconnect() {
-  if (currentSessionId.value) {
-    await lifecycle.disposeSession(props.panelId)
-    currentSessionId.value = null
-  }
+  connectGeneration++
+  await lifecycle.disposeSession(props.panelId)
+  currentSessionId.value = null
 }
 
 async function reconnect() {
-  await lifecycle.disposeSession(props.panelId)
-  currentSessionId.value = null
+  await disconnect()
   await start()
 }
 

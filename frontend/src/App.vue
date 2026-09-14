@@ -198,7 +198,6 @@ import { useTabStore } from './stores/tabStore'
 import { usePanelStore } from './stores/panelStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useAIStore } from './stores/aiStore'
-import { useCompanionStore } from './stores/companionStore'
 import { useSettingsStore } from './stores/settingsStore'
 import { useQuickCommandStore } from './stores/quickCommandStore'
 import { useSkillStore } from './stores/skillStore'
@@ -218,7 +217,6 @@ import { RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRec
 import { waitForTerminalSize } from './services/terminalManager'
 import { usePanelLifecycle } from './services/panelLifecycle'
 import { msg } from './services/message'
-import { unregisterTransferRoute } from './services/transferTaskCenter'
 import type { ConnectionConfig } from './types/session'
 import { Application, Clipboard, Events } from '@wailsio/runtime'
 import { parseQuickConnect } from './utils/quickConnect'
@@ -272,7 +270,6 @@ const panelStore = usePanelStore()
 const sessionStore = useSessionStore()
 const { duplicateSession } = useDuplicateSession()
 const aiStore = useAIStore()
-const companionStore = useCompanionStore()
 const settingsStore = useSettingsStore()
 const localStateStore = useLocalStateStore()
 const lifecycle = usePanelLifecycle()
@@ -1029,12 +1026,10 @@ const actionHandlers: Record<ShortcutAction, () => void> = {
     if (t.type === 'workspace' && t.panelIds.length > 1) {
       const panelId = t.activePanelId || t.panelIds[t.panelIds.length - 1]
       await lifecycle.disposePanel(panelId)
-      await companionStore.disposeForPanel(panelId).catch(() => {})
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
     } else if (t.type === 'workspace' && t.panelIds.length === 1) {
       const panelId = t.panelIds[0]
       await lifecycle.disposePanel(panelId)
-      await companionStore.disposeForPanel(panelId).catch(() => {})
       tabStore.removePanelFromWorkspaceTab(t.id, panelId)
     } else {
       await closeTab(t.id)
@@ -1195,18 +1190,6 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
   // connections and caches) are registered with PanelLifecycle. Closing the
   // tab only resolves its panel ids; lifecycle owns the disposal order.
   const panelIds = tabStore.closeTab(tabId)
-  // Dispose SSH companion sidebars (sftp/monitor) before removing their owner
-  // panels. Their child resources will be moved into the shared lifecycle in a
-  // later phase.
-  companionStore.disposeForPanels(panelIds).catch(() => {})
-  panelIds.forEach(pid => {
-    // Drop transfer-event routing and the panel's task list at close time —
-    // KeepAlive may keep the tab component cached, so its onUnmounted (if any)
-    // can run much later or never.
-    const p = panelStore.getPanel(pid)
-    if (p?.sessionId) unregisterTransferRoute(p.sessionId)
-    panelStore.removeTransferTasks(pid)
-  })
   await lifecycle.disposePanels(panelIds)
   nextTick(() => {
     if (tabStore.tabs.length === 0) {
@@ -1359,7 +1342,12 @@ async function connectTerminalSession(config: ConnectionConfig, persist: boolean
   // Create the panel before the backend session so lifecycle ownership starts
   // before the first async IPC call. The panel is still not mounted until its
   // session has been bound, preserving the terminal resize ordering.
-  const panel = panelStore.createPanel(config, config.type)
+  const panelType = config.type
+  switch (panelType) {
+    case 'ssh': case 'telnet': case 'mosh': case 'local': case 'wsl': case 'tcp': case 'serial': break
+    default: throw new Error(`Unsupported terminal session type: ${panelType}`)
+  }
+  const panel = panelStore.createPanel(config, panelType)
   const displayTitle = config.name || (config.type === 'local' || config.type === 'wsl'
     ? getShellLabel(config.shellPath)
     : config.type === 'serial'
@@ -1474,7 +1462,7 @@ function onPanelReconnectEvent(e: Event) {
   else if (panel.type === 'sftp') reconnectSftpPanel(panel)
 }
 
-function getShellLabel(path: string): string {
+function getShellLabel(path?: string): string {
   return getShellLabelBase(path, 'Local')
 }
 

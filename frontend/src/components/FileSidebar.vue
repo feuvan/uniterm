@@ -156,9 +156,10 @@ import { useCompanionStore } from '../stores/companionStore'
 import { usePanelStore } from '../stores/panelStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import {
-  SftpListRemote, SftpChangeRemoteDir, SftpOpenExternalEditor, SftpOpenWithSystem, ListSessions,
+  SftpListRemote, SftpChangeRemoteDir, SftpOpenExternalEditor, SftpOpenWithSystem,
   SessionInjectCwdHook,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { backendSessionApi } from '../services/backendSessionApi'
 import {
   useFilePanel, useConflictDialog, useFileDialogs, useFileListing, useChmodDialog,
   useEditorBridge, useDragOver, useNativeFileDrop, remoteFileOps, resolveRemoteTarget, joinPath,
@@ -528,7 +529,7 @@ watch(sessionId, async (sid) => {
   if (!sid) return
   bindListeners()
   try {
-    const sessions = await ListSessions()
+    const sessions = await backendSessionApi.listSessions()
     const sess = sessions.find(s => s.id === sid)
     if (sess?.status === 'connected') await onRefresh()
     else scheduleRefreshRetry()

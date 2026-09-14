@@ -19,6 +19,7 @@ export interface ContainerSession {
 }
 
 const resourceReleases = new Map<string, () => void>()
+const connectionOperations = new Map<string, Promise<void>>()
 
 export const useContainerStore = defineStore('container', {
   state: () => ({ sessions: {} as Record<string, ContainerSession> }),
@@ -31,30 +32,41 @@ export const useContainerStore = defineStore('container', {
       }
       // 读回响应式代理再操作：直接改闭包里的原始对象不会触发视图更新
       const s = this.sessions[tab.id]
-      try {
-        await client.connect(tab.connectionId)
-        if (this.sessions[tab.id] !== s) {
-          // 连接期间 tab 已关闭：回收后端连接
-          client.disconnect(tab.connectionId)
-          return
+      const lifecycle = usePanelLifecycle()
+      resourceReleases.get(tab.id)?.()
+      resourceReleases.set(tab.id, lifecycle.registerResource(tab.panelId, () => {
+        resourceReleases.delete(tab.id)
+        if (this.sessions[tab.id] === s) {
+          delete this.sessions[tab.id]
+          return client.disconnect(s.connId)
         }
-        const lifecycle = usePanelLifecycle()
-        const release = lifecycle.registerResource(tab.panelId, () => {
-          const current = this.sessions[tab.id]
-          if (current === s) {
-            client.disconnect(s.connId)
-            delete this.sessions[tab.id]
+      }))
+
+      // Container manager ids are connection ids, not per-attempt handles.
+      // Serialize opens so a late old Connect/Disconnect cannot close a newer
+      // connection with the same id during rapid reconnects.
+      const previous = connectionOperations.get(tab.id)
+      const opening = Promise.resolve(previous).catch(() => {}).then(async () => {
+        if (!lifecycle.isOpen(tab.panelId) || this.sessions[tab.id] !== s) return
+        try {
+          await client.connect(tab.connectionId)
+          if (!lifecycle.isOpen(tab.panelId) || this.sessions[tab.id] !== s) {
+            await client.disconnect(tab.connectionId)
+            return
           }
-        })
-        resourceReleases.set(tab.id, release)
-        await this.refresh(tab.id)
-        if (tab.runtime === 'nerdctl') {
-          this.loadNamespaces(tab.id)
+          await this.refresh(tab.id)
+          if (tab.runtime === 'nerdctl') await this.loadNamespaces(tab.id)
+        } catch (e: any) {
+          s.error = e?.message || String(e)
+        } finally {
+          s.loading = false
         }
-      } catch (e: any) {
-        s.error = e?.message || String(e)
+      })
+      connectionOperations.set(tab.id, opening)
+      try {
+        await opening
       } finally {
-        s.loading = false
+        if (connectionOperations.get(tab.id) === opening) connectionOperations.delete(tab.id)
       }
     },
     async refresh(tabId: string) {
@@ -145,8 +157,8 @@ export const useContainerStore = defineStore('container', {
       resourceReleases.delete(tabId)
       const s = this.sessions[tabId]
       if (!s) return
-      client.disconnect(s.connId)
       delete this.sessions[tabId]
+      return Promise.resolve(client.disconnect(s.connId)).catch(() => {})
     },
   },
 })

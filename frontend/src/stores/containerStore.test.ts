@@ -27,6 +27,8 @@ vi.mock('../services/containerClient', () => ({
 }))
 
 import { useContainerStore } from './containerStore'
+import { usePanelStore } from './panelStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import * as client from '../services/containerClient'
 
 const tab = { type: 'container' as const, id: 'tab1', panelId: 'p1', name: 'c', connectionId: 'conn1', runtime: 'docker' as const }
@@ -35,10 +37,11 @@ describe('containerStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    tab.panelId = usePanelStore().createPanel(null, 'container').id
   })
 
-  afterEach(() => {
-    // 清掉 open 启动的轮询定时器
+  afterEach(async () => {
+    await usePanelLifecycle().disposePanel(tab.panelId)
     const store = useContainerStore()
     Object.keys(store.sessions).forEach(id => store.close(id))
   })
@@ -66,6 +69,46 @@ describe('containerStore', () => {
     await store.action('tab1', 'a1', 'stop')
     expect(client.action).toHaveBeenCalledWith('conn1', 'a1', 'stop')
     expect(client.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('closes the connection from panel lifecycle without a component unmount', async () => {
+    const store = useContainerStore()
+    await store.open(tab)
+    await usePanelLifecycle().disposePanel(tab.panelId)
+    expect(client.disconnect).toHaveBeenCalledExactlyOnceWith('conn1')
+    expect(store.sessions['tab1']).toBeUndefined()
+  })
+
+  it('releases a connection that finishes after its panel was closed', async () => {
+    let finish!: () => void
+    vi.mocked(client.connect).mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve }))
+    const store = useContainerStore()
+    const opening = store.open(tab)
+    await vi.waitFor(() => expect(client.connect).toHaveBeenCalledTimes(1))
+    await usePanelLifecycle().disposePanel(tab.panelId)
+    expect(store.sessions['tab1']).toBeUndefined()
+    finish()
+    await opening
+    expect(client.disconnect).toHaveBeenCalledWith('conn1')
+    expect(store.sessions['tab1']).toBeUndefined()
+  })
+
+  it('serializes a replacement behind a pending connect and its late cleanup', async () => {
+    let finish!: () => void
+    vi.mocked(client.connect).mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve }))
+    const store = useContainerStore()
+    const opening = store.open(tab)
+    await vi.waitFor(() => expect(client.connect).toHaveBeenCalledTimes(1))
+    await store.close(tab.id)
+    const replacement = store.open(tab)
+    expect(client.connect).toHaveBeenCalledTimes(1)
+    finish()
+    await Promise.all([opening, replacement])
+    expect(client.connect).toHaveBeenCalledTimes(2)
+    const closedAt = vi.mocked(client.disconnect).mock.invocationCallOrder
+    const openedAt = vi.mocked(client.connect).mock.invocationCallOrder
+    expect(closedAt[closedAt.length - 1]).toBeLessThan(openedAt[1])
+    expect(store.sessions[tab.id].containers).toHaveLength(1)
   })
 
   it('close disconnects and drops session', async () => {

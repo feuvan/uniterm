@@ -191,6 +191,14 @@ export const usePanelStore = defineStore('panel', () => {
     return panelState.vncCaches.get(panelId)
   }
 
+  // Taking a cache transfers client ownership to the mounted view. Removing
+  // it below is destructive and must only be used for actual panel teardown.
+  function takeVNCCache(panelId: string): VNCCache | undefined {
+    const cached = panelState.vncCaches.get(panelId)
+    panelState.vncCaches.delete(panelId)
+    return cached
+  }
+
   function removeVNCCache(panelId: string) {
     const cached = panelState.vncCaches.get(panelId)
     if (cached) {
@@ -215,6 +223,12 @@ export const usePanelStore = defineStore('panel', () => {
 
   function getSPICECache(panelId: string): SPICECache | undefined {
     return panelState.spiceCaches.get(panelId)
+  }
+
+  function takeSPICECache(panelId: string): SPICECache | undefined {
+    const cached = panelState.spiceCaches.get(panelId)
+    panelState.spiceCaches.delete(panelId)
+    return cached
   }
 
   function removeSPICECache(panelId: string) {
@@ -257,10 +271,12 @@ export const usePanelStore = defineStore('panel', () => {
     removeProxyAddr,
     setVNCCache,
     getVNCCache,
+    takeVNCCache,
     removeVNCCache,
     disconnectVNCCache,
     setSPICECache,
     getSPICECache,
+    takeSPICECache,
     removeSPICECache,
     disconnectSPICECache
   }

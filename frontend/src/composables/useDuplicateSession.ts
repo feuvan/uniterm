@@ -59,6 +59,7 @@ export function useDuplicateSession() {
       return
     }
 
+    if (tab.type !== 'terminal' && !TAB_BACKED_DUPLICATE_TYPES.includes(tab.type)) return
     const newPanel = panelStore.createPanel(panel.config, panel.type)
     panelStore.updateTitle(newPanel.id, panel.title)
 
@@ -75,9 +76,14 @@ export function useDuplicateSession() {
           // Exec panels can't be rebuilt via CreateSession (no such type); re-dial the exec stream.
           const generation = usePanelLifecycle().begin(newPanel.id)
           const c = panel.config
-          info = panel.type === 'k8s-exec'
-            ? await K8sExecSession(c.k8sExecConnId, c.k8sNamespace || '', c.k8sExecPod, c.k8sExecContainer)
-            : await ContainerExecSession(c.containerExecConnId, c.containerExecContainerId, c.containerExecShell || 'sh')
+          if (panel.type === 'k8s-exec') {
+            if (!c.k8sExecConnId || !c.k8sExecPod || !c.k8sExecContainer) throw new Error('exec session parameters missing')
+            info = await K8sExecSession(c.k8sExecConnId, c.k8sNamespace || '', c.k8sExecPod, c.k8sExecContainer)
+          } else {
+            if (!c.containerExecConnId || !c.containerExecContainerId) throw new Error('exec session parameters missing')
+            info = await ContainerExecSession(c.containerExecConnId, c.containerExecContainerId, c.containerExecShell || 'sh')
+          }
+          if (!info?.id) throw new Error('Backend returned an empty exec session')
           await usePanelLifecycle().adoptSession(newPanel.id, info.id, generation)
           sessionStore.updateStatus(info.id, 'connected')
         } else {

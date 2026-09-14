@@ -75,14 +75,8 @@ export interface ConnectionConfig {
   postLoginExpectSteps?: PostLoginExpectStep[]
   // SSH tunnel: reference to an existing SSH connection used as a jump host
   tunnelSSHConnId?: string
-  // Initial terminal size reported by the frontend BEFORE the SSH/local PTY
-  // is created. Without this the backend starts the remote shell with the
-  // default 80x24 and Claude Code (or any TUI app) draws tables at that
-  // width; by the time the frontend's fitAddon measures the actual xterm
-  // cols and sends SessionResize, several lines of output are already
-  // wrapped at 80 cols and the rest at the real cols — the table borders
-  // drift apart. Frontend fills these after acquireTerminal + fitAddon.fit()
-  // and passes them in CreateSession.
+  // Runtime-only flag used by terminal sessions that bind before PTY start.
+  deferConnect?: boolean
   initialCols?: number
   initialRows?: number
   tunnelSSHUser?: string

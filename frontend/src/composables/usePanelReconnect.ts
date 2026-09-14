@@ -4,9 +4,9 @@
 // 「重连」 and the refresh-triggered auto-reconnect share one implementation:
 // close the old session, create a fresh one from the panel's stored config,
 // rebind the panel, and wait for the new session to report connected.
-import { ListSessions } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelStore } from '../stores/panelStore'
 import { usePanelLifecycle } from '../services/panelLifecycle'
+import { backendSessionApi } from '../services/backendSessionApi'
 import { fileTransferProto } from '../utils/fileTransferUtils'
 
 // One in-flight reconnect per panel: concurrent triggers (refresh spam, a
@@ -52,19 +52,19 @@ async function doReconnect(panelId: string): Promise<string | null> {
   const proto = fileTransferProto(cfg)
   const sessionType = cfg.type === 'ssh' ? proto : cfg.type
   const info = await lifecycle.createSession(panelId, sessionType, cfg)
-  const ok = await waitUntilConnected(info.id)
+  const ok = await waitUntilConnected(info.id, () =>
+    lifecycle.isOpen(panelId) && panelStore.getPanel(panelId)?.sessionId === info.id)
+  if (!ok) await lifecycle.disposeOwnedSession(panelId, info.id)
   return ok ? info.id : null
 }
 
-async function waitUntilConnected(sid: string): Promise<boolean> {
+async function waitUntilConnected(sid: string, isCurrent: () => boolean): Promise<boolean> {
   const deadline = Date.now() + CONNECT_TIMEOUT_MS
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && isCurrent()) {
     try {
-      const sessions = await ListSessions()
-      // ListSessions comes from the untyped Wails bindings (same as callers
-      // like FileTabContent's probe), so the shape is annotated locally.
-      const status = (sessions as Array<{ id: string; status: string }>)
-        .find(s => s.id === sid)?.status
+      const sessions = await backendSessionApi.listSessions()
+      if (!isCurrent()) return false
+      const status = sessions.find(s => s.id === sid)?.status
       if (status === 'connected') return true
       if (status === 'error' || status === 'disconnected') return false
     } catch { /* transient IPC failure — keep polling until the deadline */ }

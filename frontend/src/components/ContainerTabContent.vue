@@ -327,7 +327,7 @@ function onReconnectEvent(e: Event) {
 // Force-reconnect: close the current container connection, then re-open it
 // (open() re-initializes loading/error state and reconnects the client).
 async function reconnect() {
-  try { store.close(props.tab.id) } catch (_) {}
+  try { await store.close(props.tab.id) } catch (_) {}
   await store.open(props.tab)
 }
 
