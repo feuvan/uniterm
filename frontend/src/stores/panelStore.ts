@@ -190,6 +190,7 @@ export const usePanelStore = defineStore('panel', () => {
   function removeVNCCache(panelId: string) {
     const cached = panelState.vncCaches.get(panelId)
     if (cached) {
+      try { cached.rfb?.disconnect() } catch (_) {}
       if (cached.container.parentNode) {
         cached.container.parentNode.removeChild(cached.container)
       }
@@ -215,6 +216,7 @@ export const usePanelStore = defineStore('panel', () => {
   function removeSPICECache(panelId: string) {
     const cached = panelState.spiceCaches.get(panelId)
     if (cached) {
+      try { cached.sc?.stop() } catch (_) {}
       if (cached.container.parentNode) {
         cached.container.parentNode.removeChild(cached.container)
       }

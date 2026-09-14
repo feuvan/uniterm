@@ -204,7 +204,6 @@ import { useSkillStore } from './stores/skillStore'
 import { useCommandStore } from './stores/commandStore'
 import { useTunnelStore } from './stores/tunnelStore'
 import { useLocalStateStore } from './stores/localStateStore'
-import { useContainerStore } from './stores/containerStore'
 import { useSyncStore } from './stores/syncStore'
 import { useCredentialStore } from './stores/credentialStore'
 import { disposeSessionStore } from './stores/sessionStore'
@@ -214,7 +213,7 @@ import { focusPanelTerminal, installTerminalFocusRestore } from './composables/u
 import { useDuplicateSession } from './composables/useDuplicateSession'
 import type { ShortcutAction } from './types/settings'
 import { useI18n } from './i18n'
-import { CreateSession, CloseSession, RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, SessionStart, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
+import { RDPHide, RDPShow, RDPInvalidate, RDPSnapshot, RDPSetPosition, RecordRecentConnection, GetPlatform, GetBackgroundImage, RelaunchApp } from '../bindings/github.com/ys-ll/uniterm/app'
 import { getTerminalSize, waitForTerminalSize } from './services/terminalManager'
 import { usePanelLifecycle } from './services/panelLifecycle'
 import { msg } from './services/message'
@@ -274,7 +273,6 @@ const aiStore = useAIStore()
 const companionStore = useCompanionStore()
 const settingsStore = useSettingsStore()
 const localStateStore = useLocalStateStore()
-const containerStore = useContainerStore()
 const lifecycle = usePanelLifecycle()
 const syncStore = useSyncStore()
 const tunnelStore = useTunnelStore()
@@ -1196,20 +1194,9 @@ async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
       }
     }
   }
-  // Protocol-specific UI caches are stopped before the shared resource
-  // disposer removes the panel. Session ownership itself is handled once
-  // below for every panel type.
-  if (tab && tab.type === 'vnc') {
-    panelStore.disconnectVNCCache(tab.panelId)
-  }
-  if (tab && tab.type === 'spice') {
-    panelStore.disconnectSPICECache(tab.panelId)
-  }
-  // KeepAlive may leave the container component mounted, so stop its poller
-  // before the generic panel resource disposal.
-  if (tab && tab.type === 'container') {
-    containerStore.close(tab.id)
-  }
+  // Tab-specific resources (native windows, protocol clients, manager
+  // connections and caches) are registered with PanelLifecycle. Closing the
+  // tab only resolves its panel ids; lifecycle owns the disposal order.
   const panelIds = tabStore.closeTab(tabId)
   // Dispose SSH companion sidebars (sftp/monitor) before removing their owner
   // panels. Their child resources will be moved into the shared lifecycle in a
@@ -1765,13 +1752,11 @@ async function onConnectRDP(config: ConnectionConfig, prevStart?: any, persist =
   if (persist) RecordRecentConnection(config.id)
 
   try {
-    const info = await CreateSession('rdp', config)
-    panelStore.bindSession(panel.id, info.id)
-    sessionStore.initSession(info.id)
+    await lifecycle.createSession(panel.id, 'rdp', config)
   } catch (e) {
     console.error('Failed to create RDP session:', e)
+    await lifecycle.disposePanel(panel.id)
     tabStore.closeTab(tab.id)
-    panelStore.removePanel(panel.id)
   }
 }
 
@@ -1796,15 +1781,13 @@ async function onConnectVNC(config: ConnectionConfig, prevStart?: any, persist =
   // "connecting". Mirrors onConnectLocal.
   let info
   try {
-    info = await CreateSession('vnc', config)
+    info = await lifecycle.createSession(panel.id, 'vnc', config)
   } catch (e) {
     console.error('Failed to create VNC session:', e)
-    panelStore.removePanel(panel.id)
+    await lifecycle.disposePanel(panel.id)
     return
   }
   if (info.proxyAddr) panelStore.setProxyAddr(panel.id, info.proxyAddr)
-  panelStore.bindSession(panel.id, info.id)
-  sessionStore.initSession(info.id)
 
   const tab = tabStore.createVNCTab(displayTitle, panel.id)
   if (reposition) reposition(tab.id)
@@ -1828,15 +1811,13 @@ async function onConnectSPICE(config: ConnectionConfig, prevStart?: any, persist
   // sessionId and proxyAddr already bound — same v3 race as VNC.
   let info
   try {
-    info = await CreateSession('spice', config)
+    info = await lifecycle.createSession(panel.id, 'spice', config)
   } catch (e) {
     console.error('Failed to create SPICE session:', e)
-    panelStore.removePanel(panel.id)
+    await lifecycle.disposePanel(panel.id)
     return
   }
   if (info.proxyAddr) panelStore.setProxyAddr(panel.id, info.proxyAddr)
-  panelStore.bindSession(panel.id, info.id)
-  sessionStore.initSession(info.id)
 
   const tab = tabStore.createSPICETab(displayTitle, panel.id)
   if (reposition) reposition(tab.id)

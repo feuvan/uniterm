@@ -44,13 +44,13 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { Loader } from '@lucide/vue'
 import { useI18n } from '../i18n'
 import type { ConnectionConfig } from '../types/session'
-import { CreateSession, CloseSession, RDPHide, RDPSetFullScreen } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { RDPHide, RDPSetFullScreen } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import { backendErrorText, backendErrorTextOf } from '../utils/backendError'
 import { Events } from '@wailsio/runtime'
-import { usePanelStore } from '../stores/panelStore'
 
 const { t } = useI18n()
-const panelStore = usePanelStore()
+const lifecycle = usePanelLifecycle()
 
 const props = defineProps<{
   panelId: string
@@ -96,15 +96,15 @@ async function connect() {
       errorMessage.value = t('rdp.timeout')
       status.value = 'error'
       if (currentSessionId.value) {
-        try { CloseSession(currentSessionId.value) } catch (_) {}
+        lifecycle.disposeSession(props.panelId).catch(() => {})
+        currentSessionId.value = null
       }
     }
   }, CONNECT_TIMEOUT)
 
   try {
-    const info = await CreateSession('rdp', props.config)
+    const info = await lifecycle.createSession(props.panelId, 'rdp', props.config)
     currentSessionId.value = info.id
-    panelStore.bindSession(props.panelId, info.id)
   } catch (e) {
     console.error('RDP connect error:', e)
     errorMessage.value = backendErrorText(e)
@@ -115,10 +115,8 @@ async function connect() {
 
 async function reconnect() {
   clearConnectTimer()
-  if (currentSessionId.value) {
-    try { await CloseSession(currentSessionId.value) } catch (_) {}
-    currentSessionId.value = null
-  }
+  await lifecycle.disposeSession(props.panelId)
+  currentSessionId.value = null
   await connect()
 }
 

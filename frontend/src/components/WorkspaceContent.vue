@@ -26,11 +26,10 @@ defineOptions({ name: 'WorkspaceContent' })
 import { useTabStore } from '../stores/tabStore'
 import { usePanelStore } from '../stores/panelStore'
 import { useSessionStore } from '../stores/sessionStore'
-import { useCompanionStore } from '../stores/companionStore'
+import { usePanelLifecycle } from '../services/panelLifecycle'
 import type { WorkspaceTab } from '../types/workspace'
+import { useCompanionStore } from '../stores/companionStore'
 import { useDuplicateSession } from '../composables/useDuplicateSession'
-import PanelGrid from './PanelGrid.vue'
-import { CloseSession } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { ElMessageBox } from 'element-plus'
 import { useI18n } from '../i18n'
 
@@ -42,6 +41,7 @@ const tabStore = useTabStore()
 const panelStore = usePanelStore()
 const sessionStore = useSessionStore()
 const companionStore = useCompanionStore()
+const lifecycle = usePanelLifecycle()
 const { t } = useI18n()
 const { duplicateSession } = useDuplicateSession()
 
@@ -59,14 +59,9 @@ async function closePanel(panelId: string) {
       return
     }
   }
-  if (panel?.sessionId) {
-    try { await CloseSession(panel.sessionId) } catch (_) {}
-  }
-  companionStore.disposeForPanel(panelId).catch(() => {})
+  await companionStore.disposeForPanel(panelId).catch(() => {})
+  await lifecycle.disposePanel(panelId)
   tabStore.removePanelFromWorkspaceTab(props.tab.id, panelId)
-  if (panel) {
-    panelStore.removePanel(panel.id)
-  }
 }
 
 function onToggleAiLock(panelId: string) {

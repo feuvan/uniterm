@@ -486,6 +486,8 @@ async function retryConnection() {
     const at = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
     baseTerminalRef.value?.write(RESET_MOUSE_MODES + `\r\n\x1b[33mReconnecting... (${at})\x1b[0m\r\n`)
     try {
+      await lifecycle.disposeSession(props.panel.id)
+      const generation = lifecycle.begin(props.panel.id)
       let info
       if (props.panel.type === 'k8s-exec') {
         if (!c.k8sExecConnId || !c.k8sExecPod || !c.k8sExecContainer) throw new Error('exec session parameters missing')
@@ -494,8 +496,7 @@ async function retryConnection() {
         if (!c.containerExecConnId || !c.containerExecContainerId) throw new Error('exec session parameters missing')
         info = await ContainerExecSession(c.containerExecConnId, c.containerExecContainerId, c.containerExecShell || 'sh')
       }
-      panelStore.bindSession(props.panel.id, info.id)
-      sessionStore.initSession(info.id)
+      await lifecycle.adoptSession(props.panel.id, info.id, generation)
       sessionStore.updateStatus(info.id, 'connected')
     } catch (e: any) {
       baseTerminalRef.value?.write(`\r\n\x1b[31mReconnect failed: ${e?.message || e}\x1b[0m\r\n`)

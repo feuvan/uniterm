@@ -45,6 +45,7 @@ export class PanelLifecycleCancelledError extends Error {
  */
 export class PanelLifecycle {
   private generations = new Map<string, number>()
+  private disposedPanels = new Set<string>()
   private sessions = new Map<string, Set<string>>()
   private resources = new Map<string, Set<() => void | Promise<void>>>()
   private sessionDisposals = new Map<string, Promise<void>>()
@@ -71,6 +72,10 @@ export class PanelLifecycle {
    * manager connection, child process, or companion session.
    */
   registerResource(panelId: string, dispose: () => void | Promise<void>): () => void {
+    if (this.disposedPanels.has(panelId)) {
+      Promise.resolve().then(dispose).catch(() => {})
+      return () => {}
+    }
     let panelResources = this.resources.get(panelId)
     if (!panelResources) {
       panelResources = new Set()
@@ -123,6 +128,22 @@ export class PanelLifecycle {
     }
   }
 
+  /**
+   * Adopt a session created by a protocol-specific endpoint such as K8s exec
+   * or container exec. The caller starts the generation before its async IPC
+   * call and passes it back here to get the same late-result protection as
+   * CreateSession.
+   */
+  async adoptSession(panelId: string, sessionId: string, generation: number): Promise<void> {
+    if (!this.isCurrent(panelId, generation)) {
+      await this.closeQuietly(sessionId)
+      throw new PanelLifecycleCancelledError()
+    }
+    this.trackSession(panelId, sessionId)
+    this.state.initSession(sessionId)
+    this.state.bindSession(panelId, sessionId)
+  }
+
   /** Start a session that was created and bound earlier, such as a terminal. */
   async startSession(panelId: string, sessionId: string, config: ConnectionConfig): Promise<void> {
     if (!this.state.hasPanel(panelId) || this.state.getSessionId(panelId) !== sessionId) {
@@ -153,6 +174,7 @@ export class PanelLifecycle {
   async disposePanel(panelId: string): Promise<void> {
     const existing = this.panelDisposals.get(panelId)
     if (existing) return existing
+    this.disposedPanels.add(panelId)
 
     const disposal = this.disposePanelInternal(panelId).finally(() => {
       this.panelDisposals.delete(panelId)
