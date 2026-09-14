@@ -123,6 +123,20 @@ export class PanelLifecycle {
     }
   }
 
+  /** Start a session that was created and bound earlier, such as a terminal. */
+  async startSession(panelId: string, sessionId: string, config: ConnectionConfig): Promise<void> {
+    if (!this.state.hasPanel(panelId) || this.state.getSessionId(panelId) !== sessionId) {
+      await this.closeQuietly(sessionId)
+      throw new PanelLifecycleCancelledError()
+    }
+    try {
+      await this.backend.startSession(sessionId, config)
+    } catch (error) {
+      await this.closeSessionAfterFailure(panelId, sessionId)
+      throw error
+    }
+  }
+
   /** Close the currently attached session while keeping the panel alive. */
   async disposeSession(panelId: string): Promise<void> {
     const existing = this.sessionDisposals.get(panelId)

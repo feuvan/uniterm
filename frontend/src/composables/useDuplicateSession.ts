@@ -1,9 +1,6 @@
 import {
-  CreateSession,
-  CloseSession,
   K8sExecSession,
   ContainerExecSession,
-  SessionStart,
 } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { usePanelStore } from '../stores/panelStore'
 import { useTabStore } from '../stores/tabStore'
@@ -90,13 +87,7 @@ export function useDuplicateSession() {
             initialCols: 0,
             initialRows: 0,
           }
-          info = tab.type === 'sftp'
-            ? await usePanelLifecycle().createSession(newPanel.id, sessionType, config)
-            : await CreateSession(sessionType, config)
-          if (tab.type !== 'sftp') {
-            panelStore.bindSession(newPanel.id, info.id)
-            sessionStore.initSession(info.id)
-          }
+          info = await usePanelLifecycle().createSession(newPanel.id, sessionType, config)
         }
       } catch (e) {
         console.error('Failed to duplicate session:', e)
@@ -139,9 +130,8 @@ export function useDuplicateSession() {
           config.initialCols = size.cols
           config.initialRows = size.rows
         }
-        await SessionStart(info.id, config).catch((e) => {
+        await usePanelLifecycle().startSession(newPanel.id, info.id, config).catch((e) => {
           console.error('Failed to start duplicated session:', e)
-          CloseSession(info.id).catch(() => {})
         })
       } catch (e) {
         console.error('Failed to duplicate session:', e)

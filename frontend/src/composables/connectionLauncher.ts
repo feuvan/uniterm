@@ -248,12 +248,12 @@ async function runSpec(key: string, config: ConnectionConfig, spec: ConnectSpec,
   }
 
   try {
-    const filePanel = panelKind === 'sftp'
-    const info = filePanel
+    const managedPanel = panelKind === 'sftp' || panelKind === 'database' || key === 'monitor'
+    const info = managedPanel
       ? await usePanelLifecycle().createSession(panel.id, sessionType, config)
       : await CreateSession(sessionType, config)
     if (spec.sessionFirst && info?.proxyAddr) panelStore.setProxyAddr(panel.id, info.proxyAddr)
-    if (!filePanel) {
+    if (!managedPanel) {
       panelStore.bindSession(panel.id, info.id)
       if (spec.initSession) sessionStore.initSession(info.id)
     }
